@@ -1,0 +1,36 @@
+# Credenciales y configuracion local del usuario
+config.toml
+
+# Entorno virtual de Python
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Archivos compilados
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Marcadores de fichaje diario
+.markers/
+
+# Logs
+*.log
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archivos temporales de desarrollo/test
+_*.py
+_*.bat
+_*.sh
+_*.ps1
+*.bak
+*.bak[0-9]
+
+# Backups de configuracion
+config.toml.bak*

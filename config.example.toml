@@ -1,0 +1,68 @@
+# =============================================================================
+# Odoo Attendance - Configuration
+# =============================================================================
+# This is the ONLY file you need to edit. No code changes required.
+# You can edit it by hand OR open the GUI app: run "configurar.bat" (Windows)
+# or "bash configurar.sh" (Linux) and configure everything visually.
+# Copy this file to "config.toml" and fill in your values.
+# (The installer does this automatically if config.toml is missing.)
+# =============================================================================
+
+# ---- Odoo credentials & browser ---------------------------------------------
+[odoo]
+url = "https://demo.odoo.com/odoo"
+username = "demo@ejemplo.com"
+password = "CAMBIAR_ESTA_CONTRASENA"
+# Run Chrome without a visible window (true/false)
+headless = false
+# Optional: reuse an existing Chrome profile to keep sessions alive.
+# Leave empty ("") to use a fresh profile each run.
+# Windows example: "C:\\Users\\You\\AppData\\Local\\Google\\Chrome\\User Data"
+# Linux   example: "/home/you/.config/google-chrome"
+user_data_dir = ""
+
+# ---- Behavior ----------------------------------------------------------------
+[behavior]
+# Master switch: set false to completely disable the attendance dialog.
+enabled = true
+# Weekdays on which the dialog should NEVER appear.
+# 0 = Monday, 1 = Tuesday, ... 6 = Sunday
+# Default: skip Saturday (5) and Sunday (6)
+skip_weekdays = [5, 6]
+
+# ---- Schedules ---------------------------------------------------------------
+# Each weekday key is a number: 0 = Monday ... 6 = Sunday
+# Each day is a list of blocks. A block is: [check_in, check_out, category]
+#   check_in / check_out : "HH:MM" (24h)
+#   category             : name of the attendance category in Odoo (e.g. "Trabajo", "Descanso")
+# An empty list [] means: no work that day.
+
+[schedule]
+# Months (1-12) that use the summer/intensive schedule. Empty list [] = no summer schedule.
+summer_months = [7, 8]
+
+# Summer / intensive schedule (e.g. July & August)
+[schedule.summer]
+0 = [["08:00", "15:00", "Trabajo"]]
+1 = [["08:00", "15:00", "Trabajo"]]
+2 = [["08:00", "15:00", "Trabajo"]]
+3 = [["08:00", "15:00", "Trabajo"]]
+4 = [["08:00", "14:00", "Trabajo"]]
+5 = []
+6 = []
+
+# Normal schedule (rest of the year)
+[schedule.normal]
+0 = [["09:00", "14:00", "Trabajo"], ["14:00", "15:00", "Descanso"], ["15:00", "18:50", "Trabajo"]]
+1 = [["09:00", "14:00", "Trabajo"], ["14:00", "15:00", "Descanso"], ["15:00", "18:50", "Trabajo"]]
+2 = [["09:00", "14:00", "Trabajo"], ["14:00", "15:00", "Descanso"], ["15:00", "18:50", "Trabajo"]]
+3 = [["09:00", "14:00", "Trabajo"], ["14:00", "15:00", "Descanso"], ["15:00", "18:50", "Trabajo"]]
+4 = [["09:00", "15:00", "Trabajo"]]
+5 = []
+6 = []
+
+# Special days: override the weekly schedule for specific dates.
+# Key format: "MM-DD" (month-day)
+[schedule.special_days]
+"12-24" = [["08:00", "12:00", "Trabajo"]]
+"12-31" = [["08:00", "12:00", "Trabajo"]]
