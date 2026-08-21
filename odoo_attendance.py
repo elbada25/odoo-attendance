@@ -633,13 +633,46 @@ def _get_rpc_session(driver: webdriver.Chrome) -> "requests.Session":
     return session
 
 
-# Detect the local timezone once (used to tell Odoo how to interpret datetimes).
-try:
-    from datetime import timezone as _dt_tz, timedelta as _dt_td
-    _local_now = datetime.now().astimezone()
-    _LOCAL_TZ = str(_local_now.tzinfo) if _local_now.tzinfo else "UTC"
-except Exception:
-    _LOCAL_TZ = "Europe/Madrid"
+# Detect the local IANA timezone (e.g. "Europe/Madrid") so Odoo can interpret
+# naive datetimes correctly.  Windows uses its own names so we need a mapping.
+def _detect_iana_tz() -> str:
+    """Return an IANA timezone name for the local system timezone."""
+    # 1) Try zoneinfo (Python 3.9+)
+    try:
+        import zoneinfo  # type: ignore[import-untyped]
+        return str(zoneinfo.ZoneInfo("localtime"))
+    except Exception:
+        pass
+    # 2) Try reading /etc/timezone (Linux)
+    try:
+        tz = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+        if tz and "/" in tz:
+            return tz
+    except Exception:
+        pass
+    # 3) Guess from UTC offset (rough but better than a Windows name)
+    try:
+        offset = datetime.now().astimezone().utcoffset()
+        if offset is not None:
+            hours = offset.total_seconds() / 3600
+            # Common European zones
+            if hours == 1.0:
+                return "Europe/Paris"      # CET
+            if hours == 2.0:
+                return "Europe/Madrid"     # CEST
+            if hours == 0.0:
+                return "Europe/London"     # GMT/BST fallback
+            if hours == 3.0:
+                return "Europe/Moscow"
+            if hours == -4.0:
+                return "America/New_York"
+            if hours == -7.0:
+                return "America/Los_Angeles"
+    except Exception:
+        pass
+    return "Europe/Madrid"  # safe default
+
+_LOCAL_TZ = _detect_iana_tz()
 
 
 def _rpc_call(session: "requests.Session", base_url: str, model: str,
