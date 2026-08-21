@@ -47,12 +47,27 @@ PROJECT_FILES = [
 
 def build_payload() -> str:
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for disk_path, arcname in PROJECT_FILES:
-            path = SCRIPT_DIR / disk_path
-            if not path.exists():
-                raise FileNotFoundError(f"Falta {path}")
-            tar.add(path, arcname=arcname)
+    # If config.toml is missing (e.g. CI where it's gitignored), copy from
+    # config.example.toml so the payload always ships a default config.
+    config_toml = SCRIPT_DIR / "config.toml"
+    config_example = SCRIPT_DIR / "config.example.toml"
+    _restore_config = False
+    if not config_toml.exists() and config_example.exists():
+        import shutil
+        shutil.copy(config_example, config_toml)
+        _restore_config = True
+
+    try:
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for disk_path, arcname in PROJECT_FILES:
+                path = SCRIPT_DIR / disk_path
+                if not path.exists():
+                    raise FileNotFoundError(f"Falta {path}")
+                tar.add(path, arcname=arcname)
+    finally:
+        if _restore_config:
+            config_toml.unlink()
+
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 

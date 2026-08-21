@@ -261,7 +261,7 @@ function Do-Uninstall($targetDir, $progressBar, $statusLabel, $logBox) {
 
 # ---- Wizard form ----
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Odoo Attendance - Instalador  v1.0.3"
+$form.Text = "Odoo Attendance - Instalador  v1.0.4"
 $form.Size = New-Object System.Drawing.Size(540, 480)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -557,7 +557,7 @@ $form.Dispose()
 ___PS_WIZARD_END___
 
 ___ODOO_PAYLOAD_BEGIN___
-H4sIAEdqiGoC/+2963LbSLIg3L8Z4XeohaNXgE1CJHWxzRn2GdmSbc3Iko8kT0+vWkGDJChiBAIc
+H4sIAB5siGoC/+2963LbSLIg3L8Z4XeohaNXgE1CJHWxzRn2GdmSbc3Iko8kT0+vWkGDJChiBAIc
 ANSltdrYh/ie4fu3Pzb2ATZiz5vsk2xm1gWFG0m5Lc+lyei2SKCuWVlZeS973V7/w0fn5r3rDN3o
 u0f5NPmn6m+zubGRfsfnrWa71fqO3Xz3DT6zOHEi6P673+an/YJNEm/idlsvXr5ov9p8ufXKfrX9
 4uXmq9p3q8+//mcQBiPvwk7Cif9ofeCm3t7ertr/7RetF9+1ttqbrRcv2u3WJu7/FhRnzdX+f/TP
@@ -990,9 +990,9 @@ I68E0c6P7E1E6uzokmk5q1LKHiJd499ySqsc1nVzv7OFdXB3HwLXbDMIyq5h6BrvEm2JGjh60GYP
 jBRVrFrJRIoVcrOyFize14R4OtavBXj9Rwlg8Z8CaOfMSJuNBvMf9AHWaw+Y3NITW2JSuQn9dpVV
 K/3PSv+T6n9A7n7Vtje3t9qtja2V/uc38Ik0/zA7uUn+DvqfZmtD6n82AAPJ/7O93Vrpf77FR0ba
 /dDdxDsIuP9UYwgidnD1Q7eFzzBTpvdDt203fyf8q5Qo8XtmbNitlvGkJpOdYbn2yycr2rE6/1fn
-/z+f/Wfz1atX9vb25saLrdX5/1v4CPXTo/ax6PxvNrek/Wer1cLnL5qbL1bn/7f4oO5+Y7UNVuf/
-3/X83yie/63V+f9Nzv8XmfO/hef/BhDil5ur4/+38BGS3CN5fix3/m+3N8X5v/Wi3XqB+7+5tYr/
-/CYfuqDY4XdMaBY8JiV8ZYUVjCJZYEutr0s7gVRHrvVEJz1Mt7TYj0M3nwqjN+YYlLYZMmbjdY8l
-NzHL6aFdNbgQNzt+/ixcGT5/TsNjcuZRft2kPs6l7bYLzULSLLuiSqvP6rP6rD6rz+qz+qw+q8/q
-s/qsPqvP6rP6rD6rz+qz+qw+q8/qs/qsPqvP6rP6rD6rz+qz+qw+q8+yn/8HWP6vFwDgAQA=
+/z+f/Wdr80XTfrm1/erF5svVHv4NfIT66VH7WHT+N5tb0v6DBiB4/qK53Vyd/9/ig7r7zdU2WJ3/
+f9fzf6N4/rdW5/83Of9fZM7/1qtXr+wNIMQvN1fH/2/hIyS5R/L8WO78325vivN/60W79QL3f3Nr
+Ff/5TT50QbHD75jQLHhMSvjKCisYRbLAllpfl3YCqY5c64lOephuabEfh24+FUZvzDEobTNkzMbr
+HktuYpbTQ7tqcCFudvz8WbgyfP6chsfkzKP8ukl9nEvbbReahaRZdkWVVp/VZ/VZfVaf1Wf1WX1W
+n9Vn9Vl9Vp/VZ/VZfVaf1Wf1WX1Wn9Vn9Vl9Vp/VZ/VZfVaf1Wf1WX1Wn2U//w9mCDRjAOABAA==
 ___ODOO_PAYLOAD_END___
