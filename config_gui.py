@@ -76,7 +76,7 @@ def default_config() -> dict:
             "headless": False,
             "user_data_dir": "",
         },
-        "behavior": {"enabled": True, "skip_weekdays": [5, 6]},
+        "behavior": {"enabled": True, "skip_weekdays": [5, 6], "check_updates": True},
         "schedule": {
             "summer_months": [7, 8],
             "summer": {str(i): [] for i in range(7)},
@@ -241,6 +241,10 @@ class ConfigApp:
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Check for updates in background (if enabled)
+        if self.cfg.get("behavior", {}).get("check_updates", True):
+            self.root.after(1000, self._check_updates_bg)
 
     # ---- UI ---------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -696,6 +700,35 @@ class ConfigApp:
             txt.see(END)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _check_updates_bg(self) -> None:
+        """Check for updates in a background thread and notify if available."""
+        import check_updates as _cu
+
+        def _run() -> None:
+            try:
+                info = _cu.check_for_updates(APP_VERSION)
+            except Exception:
+                return
+            if not info.has_update:
+                return
+            # Schedule UI update on the main thread
+            self.root.after(0, lambda: self._show_update_notification(info))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _show_update_notification(self, info) -> None:
+        """Show a dialog when a new version is available."""
+        import webbrowser
+
+        msg = (
+            f"Hay una nueva version disponible!\n\n"
+            f"  Instalada: v{info.current_version}\n"
+            f"  Disponible: {info.latest_version}\n\n"
+            f"Deseas ir a la pagina de descarga?"
+        )
+        if messagebox.askyesno("Actualizacion disponible", msg):
+            webbrowser.open(info.download_url)
 
     def _on_close(self) -> None:
         if self._dirty:

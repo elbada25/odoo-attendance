@@ -29,6 +29,9 @@ enabled = true
 # 0 = Monday, 1 = Tuesday, ... 6 = Sunday
 # Default: skip Saturday (5) and Sunday (6)
 skip_weekdays = [5, 6]
+# Check for new versions on GitHub when opening the configuration app.
+# Set to false to disable update checks.
+check_updates = true
 
 # ---- Schedules ---------------------------------------------------------------
 # Each weekday key is a number: 0 = Monday ... 6 = Sunday

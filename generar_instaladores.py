@@ -38,6 +38,7 @@ PROJECT_FILES = [
     ("fichaje.py", "fichaje.py"),
     ("odoo_attendance.py", "odoo_attendance.py"),
     ("unlock_listener.py", "unlock_listener.py"),
+    ("check_updates.py", "check_updates.py"),
     ("requirements.txt", "requirements.txt"),
     ("VERSION", "VERSION"),
     ("version.py", "version.py"),
