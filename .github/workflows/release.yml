@@ -12,14 +12,17 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Generate installers
-        run: python generar_instaladores.py
+        run: |
+          python generar_instaladores.py
+          echo "=== Generated files ==="
+          ls -la instalador/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
