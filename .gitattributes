@@ -1,0 +1,19 @@
+﻿# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python files
+*.py text diff=python
+*.toml text
+*.txt text
+*.md text
+
+# Shell scripts (must be LF)
+*.sh text eol=lf
+
+# Batch files (must be CRLF)
+*.bat text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.gz binary
