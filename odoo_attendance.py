@@ -592,9 +592,6 @@ def main() -> int:
         print("Opening Odoo login page...")
         login(driver, url, username, password)
         print("Login successful.")
-        print("Navigating to Attendance module...")
-        go_to_attendance(driver, base_url)
-        print("Attendance module loaded.")
 
         today = date.today()
         weekday_name = ["Lunes", "Martes", "Miercoles", "Jueves",
@@ -603,14 +600,19 @@ def main() -> int:
 
         if not blocks:
             print(f"Hoy es {weekday_name} - no hay fichajes programados.")
-        else:
-            print(f"Hoy es {weekday_name} - {len(blocks)} bloque(s) a registrar:")
-            for cin, cout, cat in blocks:
-                print(f"  {cin} - {cout}  [{cat}]")
-            count = create_today_attendance(driver)
-            print(f"{count} bloque(s) de asistencia creados correctamente.")
+            return 0
 
-        print("Browser will remain open for manual review.")
+        print(f"Hoy es {weekday_name} - {len(blocks)} bloque(s) a registrar:")
+        for cin, cout, cat in blocks:
+            print(f"  {cin} - {cout}  [{cat}]")
+
+        # Use JSON-RPC (fast, same path as bulk) instead of slow UI navigation.
+        import requests as _requests
+        rpc_sess = _get_rpc_session(driver)
+        print("RPC session ready.")
+        count = _rpc_create_attendance(rpc_sess, base_url, today, blocks,
+                                       username=username)
+        print(f"{count} bloque(s) de asistencia creados correctamente.")
         return 0
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}")
@@ -797,9 +799,11 @@ def _rpc_create_attendance(
     date_str = target_date.strftime("%Y-%m-%d")
 
     # 1. Create day-block records.
-    #    Odoo derives the attendance *date* from check_in/check_out datetimes,
-    #    so we must supply them.  The tz context (injected by _rpc_call) ensures
-    #    Odoo interprets the naive datetimes in the local timezone.
+    #    Only send check_in_time / check_out_time as floats (like the UI does).
+    #    Odoo computes the actual check_in/check_out datetimes from these floats
+    #    + the attendance date + the user's timezone (context.tz).
+    #    Sending naive datetimes directly causes Odoo to treat them as UTC,
+    #    resulting in a +2h offset when displayed in the local timezone.
     day_block_ids: list[int] = []
     created_blocks: list[int] = []
     try:
@@ -809,8 +813,6 @@ def _rpc_create_attendance(
                 "check_in_time": _time_to_float(cin),
                 "check_out_time": _time_to_float(cout),
                 "category_id": cat_id,
-                "check_in": f"{date_str} {cin}:00",
-                "check_out": f"{date_str} {cout}:00",
             }
             bid = _rpc_call(session, base_url, "hr.attendance.day.block",
                             "create", [block_vals])
@@ -818,11 +820,11 @@ def _rpc_create_attendance(
             created_blocks.append(bid)
 
         # 2. Create the attendance record linking the blocks.
+        #    Don't send check_in/check_out — let Odoo compute them from the
+        #    day blocks (same as the UI form does).
         first_cat = cat_map.get(blocks[0][2], 1)
         vals = {
             "employee_id": employee_id,
-            "check_in": f"{date_str} {blocks[0][0]}:00",
-            "check_out": f"{date_str} {blocks[-1][1]}:00",
             "category_id": first_cat,
             "day_block_ids": [(6, 0, day_block_ids)],
         }
