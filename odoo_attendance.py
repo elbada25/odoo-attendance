@@ -780,6 +780,40 @@ def _time_to_float(t_str: str) -> float:
     return float(h) + float(m) / 60.0
 
 
+def _local_to_utc_str(date_str: str, time_str: str) -> str:
+    """Convert a local datetime to a UTC string for Odoo.
+
+    Odoo stores datetimes as naive UTC internally and converts them to the
+    user's timezone for display.  So to get 08:00 Europe/Madrid displayed,
+    we must send 06:00 UTC (CEST = UTC+2).
+
+    Args:
+        date_str: "YYYY-MM-DD"
+        time_str: "HH:MM"
+
+    Returns:
+        "YYYY-MM-DD HH:MM:SS" in UTC.
+    """
+    naive_local = datetime.strptime(f"{date_str} {time_str}:00", "%Y-%m-%d %H:%M:%S")
+    try:
+        import zoneinfo  # type: ignore[import-untyped]
+        tz = zoneinfo.ZoneInfo(_LOCAL_TZ)
+        aware_local = naive_local.replace(tzinfo=tz)
+        aware_utc = aware_local.astimezone(zoneinfo.ZoneInfo("UTC"))
+        return aware_utc.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Fallback: subtract the current UTC offset
+    try:
+        offset = datetime.now().astimezone().utcoffset()
+        if offset is not None:
+            aware_utc = naive_local - offset
+            return aware_utc.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return naive_local.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _rpc_create_attendance(
     session: "requests.Session",
     base_url: str,
@@ -799,11 +833,12 @@ def _rpc_create_attendance(
     date_str = target_date.strftime("%Y-%m-%d")
 
     # 1. Create day-block records.
-    #    Only send check_in_time / check_out_time as floats (like the UI does).
-    #    Odoo computes the actual check_in/check_out datetimes from these floats
-    #    + the attendance date + the user's timezone (context.tz).
-    #    Sending naive datetimes directly causes Odoo to treat them as UTC,
-    #    resulting in a +2h offset when displayed in the local timezone.
+    #    Send check_in_time/check_out_time as floats AND check_in/check_out
+    #    as UTC datetimes.  Odoo stores datetimes as naive UTC and converts
+    #    to the user's tz for display, so we convert local -> UTC first.
+    #    Without check_in/check_out, Odoo defaults check_in to now() and
+    #    leaves check_out empty, creating an "open" attendance that blocks
+    #    all subsequent creations.
     day_block_ids: list[int] = []
     created_blocks: list[int] = []
     try:
@@ -813,6 +848,8 @@ def _rpc_create_attendance(
                 "check_in_time": _time_to_float(cin),
                 "check_out_time": _time_to_float(cout),
                 "category_id": cat_id,
+                "check_in": _local_to_utc_str(date_str, cin),
+                "check_out": _local_to_utc_str(date_str, cout),
             }
             bid = _rpc_call(session, base_url, "hr.attendance.day.block",
                             "create", [block_vals])
@@ -820,11 +857,14 @@ def _rpc_create_attendance(
             created_blocks.append(bid)
 
         # 2. Create the attendance record linking the blocks.
-        #    Don't send check_in/check_out — let Odoo compute them from the
-        #    day blocks (same as the UI form does).
+        #    Send check_in/check_out as UTC so the record is "closed"
+        #    (both check_in and check_out set), preventing the
+        #    "employee has not checked out" error on subsequent days.
         first_cat = cat_map.get(blocks[0][2], 1)
         vals = {
             "employee_id": employee_id,
+            "check_in": _local_to_utc_str(date_str, blocks[0][0]),
+            "check_out": _local_to_utc_str(date_str, blocks[-1][1]),
             "category_id": first_cat,
             "day_block_ids": [(6, 0, day_block_ids)],
         }
