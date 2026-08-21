@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import webbrowser
 from datetime import date
 from pathlib import Path
 
@@ -95,27 +97,33 @@ def mark_done() -> None:
 # ---------------------------------------------------------------------------
 # Dialog (tkinter, cross-platform)
 # ---------------------------------------------------------------------------
-def show_dialog(config: dict) -> str:
-    """Show the confirmation dialog. Returns 'fichar' | 'done' | 'cancel'."""
+def show_dialog(config: dict, update_url: str = "",
+                latest_version: str = "") -> str:
+    """Show the confirmation dialog. Returns 'fichar' | 'done' | 'cancel' | 'update'.
+
+    If *update_url* is given, an "Actualizar" button is shown.
+    """
     import tkinter as tk
     from tkinter import ttk
 
     result = {"choice": "cancel"}
 
+    has_update = bool(update_url)
+    dialog_h = 250 if has_update else 210
+
     root = tk.Tk()
     root.title("Fichaje Odoo")
-    root.geometry("440x210")
+    root.geometry(f"460x{dialog_h}")
     root.resizable(False, False)
     # Center on screen
     root.update_idletasks()
-    w, h = 440, 210
+    w, h = 460, dialog_h
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
     root.attributes("-topmost", True)
 
-    # Question mark icon (built-in)
     try:
-        root.iconbitmap(default="")  # no-op fallback
+        root.iconbitmap(default="")
     except Exception:
         pass
 
@@ -127,7 +135,26 @@ def show_dialog(config: dict) -> str:
         justify="center",
         padding=10,
     )
-    label.pack(fill="x", pady=(18, 10))
+    label.pack(fill="x", pady=(18, 6))
+
+    # Update notification bar
+    if has_update:
+        update_frame = ttk.Frame(root)
+        update_frame.pack(fill="x", padx=12, pady=(0, 6))
+        update_label = ttk.Label(
+            update_frame,
+            text=f"Nueva version disponible: {latest_version}",
+            foreground="#0066cc",
+            font=("Segoe UI", 9, "bold") if os.name == "nt" else ("Sans", 9, "bold"),
+        )
+        update_label.pack(side="left", padx=2)
+        btn_update = ttk.Button(
+            update_frame,
+            text="Actualizar",
+            width=10,
+            command=lambda: choose("update"),
+        )
+        btn_update.pack(side="right", padx=6)
 
     btn_frame = ttk.Frame(root)
     btn_frame.pack(pady=8)
@@ -145,7 +172,7 @@ def show_dialog(config: dict) -> str:
     btn_cancel = ttk.Button(btn_frame, text="Ahora no", width=12, command=lambda: choose("cancel"))
     btn_cancel.pack(side="left", padx=6)
 
-    # Force foreground focus shortly after the window appears.
+    # Force foreground focus
     def _force_focus() -> None:
         root.deiconify()
         root.lift()
@@ -156,6 +183,12 @@ def show_dialog(config: dict) -> str:
 
     root.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
     root.mainloop()
+
+    # If user clicked "Actualizar", open browser
+    if result["choice"] == "update" and update_url:
+        webbrowser.open(update_url)
+        return "cancel"  # Don't block the normal flow
+
     return result["choice"]
 
 
@@ -221,8 +254,33 @@ def main() -> int:
         write_log("No blocks scheduled today - skipping dialog.")
         return 0
 
+    # 4) Check for updates (non-blocking, ~3s timeout)
+    update_url = ""
+    latest_version = ""
+    if config.get("behavior", {}).get("check_updates", True):
+        import check_updates as _cu
+        from version import get_version as _get_version
+
+        update_result: list = [None]  # mutable container for thread result
+
+        def _check() -> None:
+            try:
+                update_result[0] = _cu.check_for_updates(_get_version())
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_check, daemon=True)
+        t.start()
+        t.join(timeout=3)  # wait at most 3 seconds
+
+        if update_result[0] is not None and update_result[0].has_update:
+            update_url = update_result[0].download_url
+            latest_version = update_result[0].latest_version
+            write_log(f"Update available: {latest_version}")
+
     write_log("Showing dialog...")
-    choice = show_dialog(config)
+    choice = show_dialog(config, update_url=update_url,
+                         latest_version=latest_version)
 
     if choice == "cancel":
         write_log("User chose 'Ahora no' - will ask again later.")
