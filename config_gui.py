@@ -719,16 +719,46 @@ class ConfigApp:
 
     def _show_update_notification(self, info) -> None:
         """Show a dialog when a new version is available."""
-        import webbrowser
+        import check_updates as _cu
 
         msg = (
             f"Hay una nueva version disponible!\n\n"
             f"  Instalada: v{info.current_version}\n"
             f"  Disponible: {info.latest_version}\n\n"
-            f"Deseas ir a la pagina de descarga?"
+            f"Deseas descargar e instalar la actualizacion?"
         )
-        if messagebox.askyesno("Actualizacion disponible", msg):
-            webbrowser.open(info.download_url)
+        if not messagebox.askyesno("Actualizacion disponible", msg):
+            return
+
+        # Download and apply in background
+        win = tk.Toplevel(self.root)
+        win.title("Actualizando...")
+        win.geometry("400x120")
+        win.transient(self.root)
+        lbl = ttk.Label(win, text="Descargando e instalando actualizacion...\nEsto puede tardar un minuto.",
+                        padding=16)
+        lbl.pack(expand=True)
+
+        def _run_update() -> None:
+            ok = _cu.download_and_apply_update(info.installer_url)
+            self.root.after(0, lambda: self._update_done(win, ok))
+
+        threading.Thread(target=_run_update, daemon=True).start()
+
+    def _update_done(self, win, ok: bool) -> None:
+        win.destroy()
+        if ok:
+            messagebox.showinfo(
+                "Actualizacion completada",
+                "La aplicacion se ha actualizado correctamente.\n"
+                "Reinicia la aplicacion para usar la nueva version.",
+            )
+        else:
+            messagebox.showerror(
+                "Error",
+                "No se pudo completar la actualizacion.\n"
+                "Intentalo de nuevo mas tarde.",
+            )
 
     def _on_close(self) -> None:
         if self._dirty:

@@ -22,7 +22,6 @@ import os
 import subprocess
 import sys
 import threading
-import webbrowser
 from datetime import date
 from pathlib import Path
 
@@ -184,9 +183,19 @@ def show_dialog(config: dict, update_url: str = "",
     root.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
     root.mainloop()
 
-    # If user clicked "Actualizar", open browser
+    # If user clicked "Actualizar", download and apply update
     if result["choice"] == "update" and update_url:
-        webbrowser.open(update_url)
+        import check_updates as _cu
+        try:
+            ok = _cu.download_and_apply_update(update_url)
+            if ok:
+                import tkinter.messagebox as _mb
+                _mb.showinfo(
+                    "Actualizacion completada",
+                    "La aplicacion se ha actualizado correctamente.",
+                )
+        except Exception:
+            pass
         return "cancel"  # Don't block the normal flow
 
     return result["choice"]
@@ -255,7 +264,7 @@ def main() -> int:
         return 0
 
     # 4) Check for updates (non-blocking, ~3s timeout)
-    update_url = ""
+    installer_url = ""
     latest_version = ""
     if config.get("behavior", {}).get("check_updates", True):
         import check_updates as _cu
@@ -274,12 +283,12 @@ def main() -> int:
         t.join(timeout=3)  # wait at most 3 seconds
 
         if update_result[0] is not None and update_result[0].has_update:
-            update_url = update_result[0].download_url
+            installer_url = update_result[0].installer_url
             latest_version = update_result[0].latest_version
             write_log(f"Update available: {latest_version}")
 
     write_log("Showing dialog...")
-    choice = show_dialog(config, update_url=update_url,
+    choice = show_dialog(config, update_url=installer_url,
                          latest_version=latest_version)
 
     if choice == "cancel":
