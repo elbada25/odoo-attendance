@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import io
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -39,6 +40,9 @@ PROJECT_FILES = [
     ("odoo_attendance.py", "odoo_attendance.py"),
     ("unlock_listener.py", "unlock_listener.py"),
     ("check_updates.py", "check_updates.py"),
+    ("theme.py", "theme.py"),
+    ("datepickers.py", "datepickers.py"),
+    ("widgets.py", "widgets.py"),
     ("requirements.txt", "requirements.txt"),
     ("VERSION", "VERSION"),
     ("version.py", "version.py"),
@@ -74,41 +78,151 @@ def build_payload() -> str:
 # =========================================================================
 # Windows installer
 # =========================================================================
-WIN_TEMPLATE = r'''@echo off
-REM ===========================================================================
-REM  instalador_windows.bat  -  Instalador autocontenido con wizard (Windows)
-REM  Un solo fichero. Doble-click para instalar o desinstalar.
-REM  Se autoeleva con UAC cuando lo necesita.
-REM ===========================================================================
-setlocal enabledelayedexpansion
-set "SELF=%~f0"
+# =========================================================================
+# Windows installer (.exe via C# launcher + embedded PowerShell)
+# =========================================================================
 
-net session >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c \"\"%SELF%\"\"' -Verb RunAs"
-    exit /b 0
-)
+# C# launcher source — compiled to instalador_windows.exe with csc.exe.
+# The exe reads its own file to extract the embedded PS1 and runs it hidden.
+# No console window ever appears.
+CS_LAUNCHER = r'''// Odoo Attendance Installer Launcher
+// Reads its own executable to find embedded PowerShell + payload markers.
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Windows.Forms;
 
-set "PS1=%TEMP%\odoo_wizard_%RANDOM%.ps1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$bat = Get-Content -Raw -LiteralPath '%SELF%';" ^
-  "$s = $bat.LastIndexOf('___PS_WIZARD_BEGIN___') + 21;" ^
-  "$e = $bat.LastIndexOf('___PS_WIZARD_END___');" ^
-  "$ps = $bat.Substring($s, $e - $s);" ^
-  "[IO.File]::WriteAllText('%PS1%', $ps, [Text.Encoding]::UTF8);"
+class Launcher {
+    [STAThread]
+    static void Main() {
+        Application.EnableVisualStyles();
+        string selfPath = Application.ExecutablePath;
+        byte[] bytes = File.ReadAllBytes(selfPath);
+        // Convert to string for marker search (ASCII portion is enough)
+        string content = System.Text.Encoding.UTF8.GetString(
+            bytes, 0, Math.Min(bytes.Length, 2 * 1024 * 1024));
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -InstallerPath "%SELF%"
-set "RC=%ERRORLEVEL%"
-del "%PS1%" 2>nul
-exit /b %RC%
+        string psBegin = "___PS_WIZARD_BEGIN___";
+        string psEnd = "___PS_WIZARD_END___";
+        int s = content.LastIndexOf(psBegin);
+        int e = content.LastIndexOf(psEnd);
+        if (s < 0 || e < 0) {
+            MessageBox.Show("Installer data not found.", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        string ps1 = content.Substring(s + psBegin.Length, e - s - psBegin.Length);
 
-___PS_WIZARD_BEGIN___
-# PowerShell WinForms wizard for Odoo Attendance installer/uninstaller.
+        string tempPs1 = Path.Combine(Path.GetTempPath(),
+            "odoo_wizard_" + Path.GetRandomFileName().Replace(".", "") + ".ps1");
+        File.WriteAllText(tempPs1, ps1, System.Text.Encoding.UTF8);
+
+        // Self-elevate if needed
+        bool isAdmin = false;
+        try {
+            using (var id = System.Security.Principal.WindowsIdentity.GetCurrent()) {
+                var principal = new System.Security.Principal.WindowsPrincipal(id);
+                isAdmin = principal.IsInRole(
+                    System.Security.Principal.WindowsBuiltInRole.Administrator);
+            }
+        } catch {}
+
+        if (!isAdmin) {
+            // Re-launch self elevated, then exit
+            var psi = new ProcessStartInfo {
+                FileName = selfPath,
+                Verb = "runas",
+                UseShellExecute = true
+            };
+            try {
+                Process.Start(psi);
+            } catch {
+                // User declined UAC — run non-elevated (may fail for some steps)
+                _RunPs(tempPs1, selfPath);
+            }
+            return;
+        }
+
+        _RunPs(tempPs1, selfPath);
+    }
+
+    static void _RunPs(string tempPs1, string selfPath) {
+        var psi = new ProcessStartInfo {
+            FileName = "powershell.exe",
+            Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" + tempPs1 + "\" -InstallerPath \"" + selfPath + "\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        try {
+            var proc = Process.Start(psi);
+            proc.WaitForExit();
+        } catch (Exception ex) {
+            MessageBox.Show("Failed to run installer: " + ex.Message, "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        } finally {
+            try { File.Delete(tempPs1); } catch {}
+        }
+    }
+}
+'''
+
+# PowerShell wizard — embedded in the .exe, handles all UI + install logic.
+# Detects system dark/light theme and adapts colors.
+PS_WIZARD = r'''# PowerShell WinForms wizard for Odoo Attendance installer/uninstaller.
 param([string]$InstallerPath)
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# ── Detect system theme ────────────────────────────────────────────────────
+$lightTheme = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -ErrorAction SilentlyContinue
+$isDark = $lightTheme.AppsUseLightTheme -eq 0
+
+if ($isDark) {
+    $clrPrimary = [System.Drawing.Color]::FromArgb(59, 130, 246)
+    $clrPrimaryHov = [System.Drawing.Color]::FromArgb(37, 99, 235)
+    $clrBg = [System.Drawing.Color]::FromArgb(30, 30, 46)
+    $clrSurface = [System.Drawing.Color]::FromArgb(43, 43, 60)
+    $clrSurfaceAlt = [System.Drawing.Color]::FromArgb(53, 53, 72)
+    $clrText = [System.Drawing.Color]::FromArgb(229, 231, 235)
+    $clrTextSec = [System.Drawing.Color]::FromArgb(156, 163, 175)
+    $clrBorder = [System.Drawing.Color]::FromArgb(63, 63, 90)
+    $clrDivider = [System.Drawing.Color]::FromArgb(53, 53, 72)
+    $clrSuccess = [System.Drawing.Color]::FromArgb(34, 197, 94)
+    $clrError = [System.Drawing.Color]::FromArgb(239, 68, 68)
+    $clrWarning = [System.Drawing.Color]::FromArgb(245, 158, 11)
+    $clrInputBg = [System.Drawing.Color]::FromArgb(53, 53, 72)
+    $clrInputBorder = [System.Drawing.Color]::FromArgb(74, 74, 99)
+} else {
+    $clrPrimary = [System.Drawing.Color]::FromArgb(37, 99, 235)
+    $clrPrimaryHov = [System.Drawing.Color]::FromArgb(29, 78, 216)
+    $clrBg = [System.Drawing.Color]::FromArgb(245, 245, 245)
+    $clrSurface = [System.Drawing.Color]::FromArgb(255, 255, 255)
+    $clrSurfaceAlt = [System.Drawing.Color]::FromArgb(238, 240, 242)
+    $clrText = [System.Drawing.Color]::FromArgb(31, 41, 55)
+    $clrTextSec = [System.Drawing.Color]::FromArgb(107, 114, 128)
+    $clrBorder = [System.Drawing.Color]::FromArgb(229, 231, 235)
+    $clrDivider = [System.Drawing.Color]::FromArgb(240, 240, 240)
+    $clrSuccess = [System.Drawing.Color]::FromArgb(22, 163, 74)
+    $clrError = [System.Drawing.Color]::FromArgb(220, 38, 38)
+    $clrWarning = [System.Drawing.Color]::FromArgb(217, 119, 6)
+    $clrInputBg = [System.Drawing.Color]::FromArgb(255, 255, 255)
+    $clrInputBorder = [System.Drawing.Color]::FromArgb(209, 213, 219)
+}
+
+$fontBody = New-Object System.Drawing.Font("Segoe UI", 9)
+$fontBodyB = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$fontTitle = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+$fontSubtitle = New-Object System.Drawing.Font("Segoe UI", 10)
+$fontSmall = New-Object System.Drawing.Font("Segoe UI", 8)
+$fontSection = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$fontMono = New-Object System.Drawing.Font("Cascadia Mono", 8)
+if (-not (Test-Path "C:\Windows\Fonts\CascadiaMono.ttf")) {
+    $fontMono = New-Object System.Drawing.Font("Consolas", 8)
+}
 
 $defaultDir = Join-Path $env:USERPROFILE "OdooAttendance"
 $markerFile = Join-Path $env:LOCALAPPDATA "OdooAttendance\install_location.txt"
@@ -139,17 +253,14 @@ function Extract-Payload($confDir) {
 }
 
 function Find-Python() {
-    # Try 'python' on PATH, but EXCLUDE the Windows Store stub
     $py = (Get-Command python -ErrorAction SilentlyContinue).Source
     if ($py -and $py -notmatch 'WindowsApps') {
         try { & $py --version 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { return $py } } catch {}
     }
-    # Try 'py' launcher
     $pyLa = (Get-Command py -ErrorAction SilentlyContinue).Source
     if ($pyLa) {
         try { $exe = & py -3 -c "import sys;print(sys.executable)" 2>$null; if ($exe -and (Test-Path $exe)) { return $exe } } catch {}
     }
-    # Try common install locations
     $candidates = @(
         "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
         "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
@@ -183,19 +294,15 @@ function Do-Install($targetDir, $createShortcut, $progressBar, $statusLabel, $lo
     $backupConfig = $null
 
     $steps = @(
-        @{ Label = "Extrayendo ficheros del proyecto..."; Action = {
-            # Backup existing config if preserving
+        @{ Label = "Extrayendo ficheros..."; Action = {
             if ($preserveConfig -and (Test-Path $configToml)) {
                 $backupConfig = Join-Path $env:TEMP "odoo_config_backup_$(Get-Random).toml"
                 Copy-Item $configToml $backupConfig
-                $logBox.AppendText("  Configuracion anterior respaldada.`r`n")
             }
             Extract-Payload $confDir
-            # Restore config after extraction
             if ($backupConfig -and (Test-Path $backupConfig)) {
                 Copy-Item $backupConfig $configToml -Force
                 Remove-Item $backupConfig -Force
-                $logBox.AppendText("  Configuracion anterior restaurada.`r`n")
             }
         } },
         @{ Label = "Buscando Python..."; Action = { $script:py = Find-Python; if (-not $script:py) { $script:py = Install-Python } } },
@@ -203,57 +310,17 @@ function Do-Install($targetDir, $createShortcut, $progressBar, $statusLabel, $lo
             $venvPy = Join-Path $confDir ".venv\Scripts\python.exe"
             if (-not (Test-Path $venvPy)) {
                 & $script:py -m venv (Join-Path $confDir ".venv") 2>&1 | Out-Null
-                if (-not (Test-Path $venvPy)) {
-                    throw "No se pudo crear el entorno virtual con Python: $($script:py)"
-                }
+                if (-not (Test-Path $venvPy)) { throw "No se pudo crear el venv" }
             }
         } },
         @{ Label = "Instalando dependencias..."; Action = {
             $vp = Join-Path $confDir ".venv\Scripts\python.exe"
-            if (-not (Test-Path $vp)) { throw "No se encontro python.exe en el venv" }
             & $vp -m pip install --upgrade pip 2>&1 | Out-Null
             & $vp -m pip install -r (Join-Path $confDir "requirements.txt") 2>&1 | Out-Null
         } },
         @{ Label = "Creando accesos directos..."; Action = {
-            # Top-level launcher bat
-            $launcher = Join-Path $targetDir "Configurar Fichaje Odoo.bat"
             $venvPyw = Join-Path $confDir ".venv\Scripts\pythonw.exe"
             $guiScript = Join-Path $confDir "config_gui.py"
-            @"
-@echo off
-"$venvPyw" "$guiScript"
-"@ | Set-Content $launcher -Encoding UTF8
-
-            # Top-level uninstaller bat
-            $uninstaller = Join-Path $targetDir "Desinstalar.bat"
-            @"
-@echo off
-setlocal
-set "SELF=%~f0"
-set "TARGET_DIR=%~dp0"
-set "TARGET_DIR=%TARGET_DIR:~0,-1%"
-set TASK_NAME=OdooAttendance
-net session >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c \"\"%SELF%\"\"' -Verb RunAs"
-    exit /b 0
-)
-echo Eliminando tarea programada...
-schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1
-echo Eliminando acceso directo del escritorio...
-del /q "%USERPROFILE%\Desktop\Configurar Fichaje Odoo.lnk" 2>nul
-echo Limpiando registro...
-rd /s /q "%LOCALAPPDATA%\OdooAttendance" 2>nul
-echo Eliminando directorio de instalacion...
-cd /d "%USERPROFILE%"
-rd /s /q "%TARGET_DIR%" 2>nul
-echo.
-echo Desinstalacion completada.
-pause
-endlocal
-"@ | Set-Content $uninstaller -Encoding UTF8
-
-            # Desktop shortcut (if requested)
             if ($createShortcut) {
                 $lnk = Join-Path $env:USERPROFILE "Desktop\Configurar Fichaje Odoo.lnk"
                 $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
@@ -293,7 +360,7 @@ endlocal
             schtasks /Create /TN $taskName /XML $xml /F 2>&1 | Out-Null
             Remove-Item $xml -Force -ErrorAction SilentlyContinue
         } },
-        @{ Label = "Guardando informacion de instalacion..."; Action = {
+        @{ Label = "Finalizando..."; Action = {
             $markerDir = Split-Path $markerFile
             if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
             Set-Content $markerFile $targetDir -Encoding UTF8
@@ -320,7 +387,7 @@ function Do-Uninstall($targetDir, $progressBar, $statusLabel, $logBox) {
     $steps = @(
         @{ Label = "Eliminando tarea programada..."; Action = { schtasks /Delete /TN $taskName /F 2>&1 | Out-Null } },
         @{ Label = "Eliminando acceso directo..."; Action = { Remove-Item (Join-Path $env:USERPROFILE "Desktop\Configurar Fichaje Odoo.lnk") -Force -ErrorAction SilentlyContinue } },
-        @{ Label = "Eliminando directorio de instalacion..."; Action = { if (Test-Path $targetDir) { Remove-Item $targetDir -Recurse -Force -ErrorAction SilentlyContinue } } },
+        @{ Label = "Eliminando directorio..."; Action = { if (Test-Path $targetDir) { Remove-Item $targetDir -Recurse -Force -ErrorAction SilentlyContinue } } },
         @{ Label = "Limpiando registro..."; Action = { Remove-Item $markerFile -Force -ErrorAction SilentlyContinue } }
     )
     for ($i = 0; $i -lt $steps.Count; $i++) {
@@ -335,60 +402,96 @@ function Do-Uninstall($targetDir, $progressBar, $statusLabel, $logBox) {
     }
 }
 
-# ---- Wizard form ----
+# ── Styled button helper ───────────────────────────────────────────────────
+function New-Button($text, $x, $y, $w, $h, $isPrimary) {
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = $text
+    $btn.Location = New-Object System.Drawing.Point($x, $y)
+    $btn.Size = New-Object System.Drawing.Size($w, $h)
+    $btn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btn.FlatAppearance.BorderSize = if ($isPrimary) { 0 } else { 1 }
+    $btn.FlatAppearance.BorderColor = $clrBorder
+    $btn.Font = if ($isPrimary) { $fontBodyB } else { $fontBody }
+    if ($isPrimary) {
+        $btn.BackColor = $clrPrimary
+        $btn.ForeColor = [System.Drawing.Color]::White
+    } else {
+        $btn.BackColor = $clrSurface
+        $btn.ForeColor = $clrText
+    }
+    $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
+    return $btn
+}
+
+# ── Main form ──────────────────────────────────────────────────────────────
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Odoo Attendance - Instalador  v___VERSION___"
-$form.Size = New-Object System.Drawing.Size(540, 480)
+$form.Size = New-Object System.Drawing.Size(560, 600)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
 $form.MinimizeBox = $false
-$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Font = $fontBody
+$form.BackColor = $clrBg
+
+# ── Header ─────────────────────────────────────────────────────────────────
+$headerPanel = New-Object System.Windows.Forms.Panel
+$headerPanel.Location = New-Object System.Drawing.Point(0, 0)
+$headerPanel.Size = New-Object System.Drawing.Size(560, 80)
+$headerPanel.BackColor = $clrSurface
+$form.Controls.Add($headerPanel)
+
+$accentBar = New-Object System.Windows.Forms.Panel
+$accentBar.Location = New-Object System.Drawing.Point(0, 78)
+$accentBar.Size = New-Object System.Drawing.Size(560, 2)
+$accentBar.BackColor = $clrPrimary
+$form.Controls.Add($accentBar)
 
 $titleLabel = New-Object System.Windows.Forms.Label
 $titleLabel.Text = "Odoo Attendance"
-$titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
-$titleLabel.Location = New-Object System.Drawing.Point(20, 15)
-$titleLabel.Size = New-Object System.Drawing.Size(500, 30)
-$form.Controls.Add($titleLabel)
+$titleLabel.Font = $fontTitle
+$titleLabel.ForeColor = $clrPrimary
+$titleLabel.Location = New-Object System.Drawing.Point(24, 16)
+$titleLabel.Size = New-Object System.Drawing.Size(300, 32)
+$headerPanel.Controls.Add($titleLabel)
 
 $subtitleLabel = New-Object System.Windows.Forms.Label
 $subtitleLabel.Text = "Automatizacion de fichaje en Odoo"
-$subtitleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$subtitleLabel.ForeColor = [System.Drawing.Color]::Gray
-$subtitleLabel.Location = New-Object System.Drawing.Point(20, 45)
-$subtitleLabel.Size = New-Object System.Drawing.Size(500, 20)
-$form.Controls.Add($subtitleLabel)
+$subtitleLabel.Font = $fontSubtitle
+$subtitleLabel.ForeColor = $clrTextSec
+$subtitleLabel.Location = New-Object System.Drawing.Point(24, 48)
+$subtitleLabel.Size = New-Object System.Drawing.Size(400, 22)
+$headerPanel.Controls.Add($subtitleLabel)
 
-$sep = New-Object System.Windows.Forms.Label
-$sep.Location = New-Object System.Drawing.Point(20, 75)
-$sep.Size = New-Object System.Drawing.Size(500, 2)
-$sep.BackColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
-$form.Controls.Add($sep)
-
+# ── Content ────────────────────────────────────────────────────────────────
 $contentPanel = New-Object System.Windows.Forms.Panel
-$contentPanel.Location = New-Object System.Drawing.Point(20, 85)
-$contentPanel.Size = New-Object System.Drawing.Size(500, 320)
+$contentPanel.Location = New-Object System.Drawing.Point(24, 96)
+$contentPanel.Size = New-Object System.Drawing.Size(512, 380)
+$contentPanel.BackColor = $clrBg
 $form.Controls.Add($contentPanel)
 
-$btnBack = New-Object System.Windows.Forms.Button
-$btnBack.Text = "< Atras"
-$btnBack.Location = New-Object System.Drawing.Point(20, 415)
-$btnBack.Size = New-Object System.Drawing.Size(90, 28)
+# ── Launch checkbox ────────────────────────────────────────────────────────
+$cbLaunch = New-Object System.Windows.Forms.CheckBox
+$cbLaunch.Text = "Abrir 'Configurar Fichaje Odoo' al cerrar"
+$cbLaunch.Location = New-Object System.Drawing.Point(24, 486)
+$cbLaunch.Size = New-Object System.Drawing.Size(300, 24)
+$cbLaunch.Font = $fontBody
+$cbLaunch.Checked = $true
+$cbLaunch.Visible = $false
+$cbLaunch.BackColor = $clrBg
+$cbLaunch.ForeColor = $clrText
+$form.Controls.Add($cbLaunch)
+
+# ── Footer buttons ─────────────────────────────────────────────────────────
+$btnBack = New-Button "< Atras" 24 530 90 30 $false
 $btnBack.Visible = $false
 $form.Controls.Add($btnBack)
 
-$btnNext = New-Object System.Windows.Forms.Button
-$btnNext.Text = "Siguiente >"
-$btnNext.Location = New-Object System.Drawing.Point(430, 415)
-$btnNext.Size = New-Object System.Drawing.Size(90, 28)
-$form.Controls.Add($btnNext)
-
-$btnCancel = New-Object System.Windows.Forms.Button
-$btnCancel.Text = "Cancelar"
-$btnCancel.Location = New-Object System.Drawing.Point(335, 415)
-$btnCancel.Size = New-Object System.Drawing.Size(90, 28)
+$btnCancel = New-Button "Cancelar" 350 530 90 30 $false
 $form.Controls.Add($btnCancel)
+
+$btnNext = New-Button "Siguiente >" 446 530 90 30 $true
+$form.Controls.Add($btnNext)
 
 $script:page = 0
 $script:mode = "install"
@@ -396,25 +499,35 @@ $script:targetDir = $defaultDir
 $script:createShortcut = $true
 $script:py = $null
 $script:preserveConfig = $false
+$script:installSuccess = $false
 $existingDir = Get-InstallDir
 
 function Clear-Content() { $contentPanel.Controls.Clear() }
 
+function Add-Label($text, $x, $y, $w, $h, $font, $color) {
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $text
+    $lbl.Location = New-Object System.Drawing.Point($x, $y)
+    $lbl.Size = New-Object System.Drawing.Size($w, $h)
+    $lbl.Font = $font
+    $lbl.ForeColor = $color
+    $lbl.BackColor = $clrBg
+    $contentPanel.Controls.Add($lbl)
+    return $lbl
+}
+
 function Show-Welcome() {
     Clear-Content
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Location = New-Object System.Drawing.Point(0, 10)
-    $lbl.Size = New-Object System.Drawing.Size(500, 200)
-    $lbl.Text = @"
+    Add-Label "Bienvenido al asistente de instalacion" 0 10 512 28 $fontSection $clrText
+    Add-Label @"
 Este asistente te ayudara a instalar Odoo Attendance.
 
-La aplicacion fichara automaticamente en Odoo cada vez que desbloquees el PC,
-preguntandote antes si quieres hacerlo. Podras configurar credenciales y
-horarios desde una interfaz grafica.
+La aplicacion fichara automaticamente en Odoo cada vez que desbloquees
+el PC, preguntandote antes si quieres hacerlo. Podras configurar
+credenciales y horarios desde una interfaz grafica.
 
 Haz clic en Siguiente para continuar.
-"@
-    $contentPanel.Controls.Add($lbl)
+"@ 0 50 512 160 $fontBody $clrText
     $btnBack.Visible = $false
     $btnNext.Text = "Siguiente >"
     $btnNext.Enabled = $true
@@ -422,33 +535,43 @@ Haz clic en Siguiente para continuar.
 
 function Show-Welcome-Installed() {
     Clear-Content
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Location = New-Object System.Drawing.Point(0, 10)
-    $lbl.Size = New-Object System.Drawing.Size(500, 120)
-    $lbl.Text = @"
-Odoo Attendance ya esta instalado en:
+    Add-Label "Odoo Attendance ya esta instalado" 0 10 512 28 $fontSection $clrText
+    Add-Label @"
+Directorio de instalacion:
 
 $existingDir
 
 Que deseas hacer?
-"@
-    $contentPanel.Controls.Add($lbl)
+"@ 0 50 512 90 $fontBody $clrText
+
     $rbUpdate = New-Object System.Windows.Forms.RadioButton
     $rbUpdate.Text = "Actualizar (conserva configuracion, credenciales y horarios)"
-    $rbUpdate.Location = New-Object System.Drawing.Point(20, 130)
-    $rbUpdate.Size = New-Object System.Drawing.Size(460, 24)
+    $rbUpdate.Location = New-Object System.Drawing.Point(20, 150)
+    $rbUpdate.Size = New-Object System.Drawing.Size(480, 28)
     $rbUpdate.Checked = $true
+    $rbUpdate.Font = $fontBody
+    $rbUpdate.ForeColor = $clrText
+    $rbUpdate.BackColor = $clrBg
     $contentPanel.Controls.Add($rbUpdate)
+
     $rbReinstall = New-Object System.Windows.Forms.RadioButton
     $rbReinstall.Text = "Reinstalar (borra configuracion, empieza de cero)"
-    $rbReinstall.Location = New-Object System.Drawing.Point(20, 160)
-    $rbReinstall.Size = New-Object System.Drawing.Size(460, 24)
+    $rbReinstall.Location = New-Object System.Drawing.Point(20, 184)
+    $rbReinstall.Size = New-Object System.Drawing.Size(480, 28)
+    $rbReinstall.Font = $fontBody
+    $rbReinstall.ForeColor = $clrText
+    $rbReinstall.BackColor = $clrBg
     $contentPanel.Controls.Add($rbReinstall)
+
     $rbUninstall = New-Object System.Windows.Forms.RadioButton
     $rbUninstall.Text = "Desinstalar"
-    $rbUninstall.Location = New-Object System.Drawing.Point(20, 190)
-    $rbUninstall.Size = New-Object System.Drawing.Size(300, 24)
+    $rbUninstall.Location = New-Object System.Drawing.Point(20, 218)
+    $rbUninstall.Size = New-Object System.Drawing.Size(300, 28)
+    $rbUninstall.Font = $fontBody
+    $rbUninstall.ForeColor = $clrText
+    $rbUninstall.BackColor = $clrBg
     $contentPanel.Controls.Add($rbUninstall)
+
     $script:rbUpdate = $rbUpdate
     $script:rbReinstall = $rbReinstall
     $script:rbUninstall = $rbUninstall
@@ -459,22 +582,20 @@ Que deseas hacer?
 
 function Show-Directory() {
     Clear-Content
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "Selecciona el directorio de instalacion:"
-    $lbl.Location = New-Object System.Drawing.Point(0, 10)
-    $lbl.Size = New-Object System.Drawing.Size(500, 20)
-    $contentPanel.Controls.Add($lbl)
+    Add-Label "Directorio de instalacion" 0 10 512 28 $fontSection $clrText
+    Add-Label "Selecciona donde instalar la aplicacion:" 0 44 512 20 $fontBody $clrText
 
     $txt = New-Object System.Windows.Forms.TextBox
     $txt.Text = $script:targetDir
-    $txt.Location = New-Object System.Drawing.Point(0, 35)
-    $txt.Size = New-Object System.Drawing.Size(400, 24)
+    $txt.Location = New-Object System.Drawing.Point(0, 70)
+    $txt.Size = New-Object System.Drawing.Size(410, 26)
+    $txt.Font = $fontBody
+    $txt.BackColor = $clrInputBg
+    $txt.ForeColor = $clrText
+    $txt.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $contentPanel.Controls.Add($txt)
 
-    $browse = New-Object System.Windows.Forms.Button
-    $browse.Text = "Examinar..."
-    $browse.Location = New-Object System.Drawing.Point(410, 34)
-    $browse.Size = New-Object System.Drawing.Size(85, 26)
+    $browse = New-Button "Examinar..." 418 68 90 28 $false
     $browse.Add_Click({
         $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
         $dlg.SelectedPath = $txt.Text
@@ -482,19 +603,16 @@ function Show-Directory() {
     })
     $contentPanel.Controls.Add($browse)
 
-    $info = New-Object System.Windows.Forms.Label
-    $info.Text = "El directorio se creara si no existe."
-    $info.ForeColor = [System.Drawing.Color]::Gray
-    $info.Location = New-Object System.Drawing.Point(0, 65)
-    $info.Size = New-Object System.Drawing.Size(500, 20)
-    $contentPanel.Controls.Add($info)
+    Add-Label "El directorio se creara si no existe." 0 104 512 20 $fontSmall $clrTextSec
 
-    # Shortcut checkbox
     $cbShortcut = New-Object System.Windows.Forms.CheckBox
     $cbShortcut.Text = "Crear acceso directo en el Escritorio"
-    $cbShortcut.Location = New-Object System.Drawing.Point(0, 100)
-    $cbShortcut.Size = New-Object System.Drawing.Size(300, 24)
+    $cbShortcut.Location = New-Object System.Drawing.Point(0, 136)
+    $cbShortcut.Size = New-Object System.Drawing.Size(300, 26)
     $cbShortcut.Checked = $true
+    $cbShortcut.Font = $fontBody
+    $cbShortcut.ForeColor = $clrText
+    $cbShortcut.BackColor = $clrBg
     $contentPanel.Controls.Add($cbShortcut)
 
     $script:dirTextBox = $txt
@@ -506,10 +624,8 @@ function Show-Directory() {
 
 function Show-Uninstall-Confirm() {
     Clear-Content
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Location = New-Object System.Drawing.Point(0, 10)
-    $lbl.Size = New-Object System.Drawing.Size(500, 170)
-    $lbl.Text = @"
+    Add-Label "Confirmar desinstalacion" 0 10 512 28 $fontSection $clrError
+    Add-Label @"
 Se va a DESINSTALAR Odoo Attendance.
 
 Esto eliminara:
@@ -518,12 +634,11 @@ Esto eliminara:
   - El directorio: $existingDir
     (incluyendo config.toml, .venv, .markers y logs)
 
-Tu configuracion se perdera. Si quieres conservarla, copia config.toml
-antes de continuar.
+Tu configuracion se perdera. Si quieres conservarla, copia
+config.toml antes de continuar.
 
 Haz clic en Desinstalar para continuar.
-"@
-    $contentPanel.Controls.Add($lbl)
+"@ 0 50 512 220 $fontBody $clrText
     $btnBack.Visible = $true
     $btnNext.Text = "Desinstalar >"
     $btnNext.Enabled = $true
@@ -531,15 +646,20 @@ Haz clic en Desinstalar para continuar.
 
 function Show-Progress() {
     Clear-Content
+
     $statusLabel = New-Object System.Windows.Forms.Label
     $statusLabel.Text = "Iniciando..."
     $statusLabel.Location = New-Object System.Drawing.Point(0, 10)
-    $statusLabel.Size = New-Object System.Drawing.Size(500, 24)
+    $statusLabel.Size = New-Object System.Drawing.Size(512, 24)
+    $statusLabel.Font = $fontBodyB
+    $statusLabel.ForeColor = $clrText
+    $statusLabel.BackColor = $clrBg
     $contentPanel.Controls.Add($statusLabel)
 
     $progressBar = New-Object System.Windows.Forms.ProgressBar
     $progressBar.Location = New-Object System.Drawing.Point(0, 40)
-    $progressBar.Size = New-Object System.Drawing.Size(500, 24)
+    $progressBar.Size = New-Object System.Drawing.Size(512, 22)
+    $progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
     $contentPanel.Controls.Add($progressBar)
 
     $logBox = New-Object System.Windows.Forms.TextBox
@@ -547,37 +667,43 @@ function Show-Progress() {
     $logBox.ScrollBars = "Vertical"
     $logBox.ReadOnly = $true
     $logBox.Location = New-Object System.Drawing.Point(0, 75)
-    $logBox.Size = New-Object System.Drawing.Size(500, 230)
-    $logBox.Font = New-Object System.Drawing.Font("Consolas", 8)
+    $logBox.Size = New-Object System.Drawing.Size(512, 290)
+    $logBox.Font = $fontMono
+    $logBox.BackColor = $clrSurface
+    $logBox.ForeColor = $clrText
+    $logBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
     $contentPanel.Controls.Add($logBox)
 
     $btnBack.Visible = $false
     $btnNext.Visible = $false
     $btnCancel.Text = "Cerrar"
     $btnCancel.Enabled = $false
+    $cbLaunch.Visible = $false
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
         if ($script:mode -eq "install") {
             Do-Install $script:targetDir $script:createShortcut $progressBar $statusLabel $logBox $script:preserveConfig
             $statusLabel.Text = "Instalacion completada."
+            $statusLabel.ForeColor = $clrSuccess
             $logBox.AppendText("`r`n=== INSTALACION COMPLETA ===`r`n")
             $logBox.AppendText("Directorio: $($script:targetDir)`r`n")
-            if ($script:createShortcut) {
-                $logBox.AppendText("Acceso directo creado en el Escritorio.`r`n")
-            }
-            $logBox.AppendText("`r`nAbre 'Configurar Fichaje Odoo' para configurar tus credenciales y horarios.`r`n")
-            $logBox.AppendText("Para desinstalar: ejecuta 'Desinstalar.bat' en el directorio de instalacion.`r`n")
+            $script:installSuccess = $true
         } else {
             Do-Uninstall $existingDir $progressBar $statusLabel $logBox
             $statusLabel.Text = "Desinstalacion completada."
+            $statusLabel.ForeColor = $clrSuccess
             $logBox.AppendText("`r`n=== DESINSTALACION COMPLETA ===`r`n")
         }
         $progressBar.Value = 100
     } catch {
-        $statusLabel.Text = "ERROR: $_"
+        $statusLabel.Text = "Error: $_"
+        $statusLabel.ForeColor = $clrError
         $logBox.AppendText("`r`n=== ERROR ===`r`n$_`r`n")
         $progressBar.Value = 0
+    }
+    if ($script:installSuccess -and $script:mode -eq "install") {
+        $cbLaunch.Visible = $true
     }
     $btnCancel.Enabled = $true
     $btnCancel.Text = "Cerrar"
@@ -594,7 +720,6 @@ $btnNext.Add_Click({
                 } else {
                     $script:mode = "install"
                     $script:targetDir = $existingDir
-                    # rbUpdate preserves config, rbReinstall wipes it
                     $script:preserveConfig = (-not $script:rbReinstall.Checked)
                     $script:page = 1
                     Show-Directory
@@ -625,7 +750,16 @@ $btnBack.Add_Click({
     }
 })
 
-$btnCancel.Add_Click({ $form.Close() })
+$btnCancel.Add_Click({
+    if ($script:installSuccess -and $script:mode -eq "install" -and $cbLaunch.Checked) {
+        $venvPyw = Join-Path $script:targetDir "conf\.venv\Scripts\pythonw.exe"
+        $guiScript = Join-Path $script:targetDir "conf\config_gui.py"
+        if (Test-Path $venvPyw) {
+            Start-Process -FilePath $venvPyw -ArgumentList "`"$guiScript`"" -WorkingDirectory (Join-Path $script:targetDir "conf")
+        }
+    }
+    $form.Close()
+})
 
 if ($existingDir) { Show-Welcome-Installed } else { Show-Welcome }
 $form.ShowDialog() | Out-Null
@@ -634,8 +768,7 @@ ___PS_WIZARD_END___
 
 ___ODOO_PAYLOAD_BEGIN___
 __PAYLOAD__
-___ODOO_PAYLOAD_END___
-'''
+___ODOO_PAYLOAD_END___'''
 
 # =========================================================================
 # Linux installer
@@ -984,6 +1117,53 @@ ___ODOO_PAYLOAD_END___
 '''
 
 
+def _find_csc() -> str | None:
+    """Find the C# compiler (csc.exe) on Windows."""
+    import glob
+    # Check .NET Framework paths
+    candidates = sorted(glob.glob(
+        r"C:\Windows\Microsoft.NET\Framework64\v*\csc.exe"), reverse=True)
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    candidates = sorted(glob.glob(
+        r"C:\Windows\Microsoft.NET\Framework\v*\csc.exe"), reverse=True)
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def _generate_bat_fallback(installer_dir, ps_with_payload: str, version: str) -> None:
+    """Generate a .bat installer as fallback when csc.exe is not available."""
+    bat = f'''@echo off
+setlocal enabledelayedexpansion
+set "SELF=%~f0"
+net session >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    powershell -NoProfile -WindowStyle Hidden -Command "Start-Process cmd -ArgumentList '/c \\"\\"%SELF%\\"\\"' -Verb RunAs -WindowStyle Hidden"
+    exit /b 0
+)
+set "PS1=%TEMP%\\odoo_wizard_%RANDOM%.ps1"
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command ^
+  "$bat = Get-Content -Raw -LiteralPath '%SELF%';" ^
+  "$s = $bat.LastIndexOf('___PS_WIZARD_BEGIN___') + 21;" ^
+  "$e = $bat.LastIndexOf('___PS_WIZARD_END___');" ^
+  "$ps = $bat.Substring($s, $e - $s);" ^
+  "[IO.File]::WriteAllText('%PS1%', $ps, [Text.Encoding]::UTF8);"
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PS1%" -InstallerPath "%SELF%"
+set "RC=%ERRORLEVEL%"
+del "%PS1%" 2>nul
+exit /b %RC%
+
+___PS_WIZARD_BEGIN___
+{ps_with_payload}
+'''
+    path = installer_dir / "instalador_windows.bat"
+    path.write_text(bat, encoding="utf-8")
+    print(f"  {path}  ({len(bat):,} bytes)")
+
+
 def main() -> None:
     payload = build_payload()
     lines = [payload[i:i+76] for i in range(0, len(payload), 76)]
@@ -991,16 +1171,62 @@ def main() -> None:
 
     INSTALLER_DIR.mkdir(exist_ok=True)
 
-    win = WIN_TEMPLATE.replace("__PAYLOAD__", payload_text)
-    win = win.replace("___VERSION___", _VERSION)
-    (INSTALLER_DIR / "instalador_windows.bat").write_text(win, encoding="utf-8")
+    # Build the embedded PowerShell + payload content
+    ps_with_payload = PS_WIZARD.replace("__PAYLOAD__", payload_text)
+    ps_with_payload = ps_with_payload.replace("___VERSION___", _VERSION)
 
+    # ── Linux installer (.sh) ──
     linux = LINUX_TEMPLATE.replace("__PAYLOAD__", payload_text)
     linux = linux.replace("___VERSION___", _VERSION)
     (INSTALLER_DIR / "instalador_linux.sh").write_text(linux, encoding="utf-8")
 
-    print(f"Generados:")
-    print(f"  {INSTALLER_DIR / 'instalador_windows.bat'}  ({len(win):,} bytes)")
+    # ── Windows installer (.exe) ──
+    exe_path = INSTALLER_DIR / "instalador_windows.exe"
+    cs_path = INSTALLER_DIR / "_launcher.cs"
+
+    # Write the C# launcher source
+    cs_source = CS_LAUNCHER.replace("___VERSION___", _VERSION)
+    cs_path.write_text(cs_source, encoding="utf-8")
+
+    csc = _find_csc()
+    if csc:
+        # Compile to a temporary exe
+        tmp_exe = INSTALLER_DIR / "_launcher_tmp.exe"
+        cmd = [
+            csc, "/nologo", "/noconfig",
+            "/target:winexe",  # GUI app — no console
+            "/optimize+",
+            "/r:System.Windows.Forms.dll",
+            "/r:System.Drawing.dll",
+            "/r:System.Security.dll",
+            "/r:System.dll",
+            f"/out:{tmp_exe}",
+            str(cs_path),
+        ]
+        print(f"Compilando con: {csc}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print("ERROR de compilacion C#:")
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            _generate_bat_fallback(INSTALLER_DIR, ps_with_payload, _VERSION)
+        else:
+            # Append the PowerShell + payload to the exe
+            # The C# launcher reads its own file and searches for markers
+            with open(tmp_exe, "ab") as fh:
+                fh.write(b"\r\n___PS_WIZARD_BEGIN___\r\n")
+                fh.write(ps_with_payload.encode("utf-8"))
+                fh.write(b"\r\n")
+            # Move to final name
+            tmp_exe.replace(exe_path)
+            # Clean up
+            cs_path.unlink(missing_ok=True)
+            print(f"Generados:")
+            print(f"  {exe_path}  ({exe_path.stat().st_size:,} bytes)")
+    else:
+        print("ADVERTENCIA: csc.exe no encontrado. Generando .bat como fallback.")
+        _generate_bat_fallback(INSTALLER_DIR, ps_with_payload, _VERSION)
+
     print(f"  {INSTALLER_DIR / 'instalador_linux.sh'}  ({len(linux):,} bytes)")
     print(f"  Payload: {len(payload):,} chars base64 ({len(lines)} lineas)")
 

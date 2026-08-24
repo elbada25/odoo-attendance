@@ -71,9 +71,12 @@ def check_for_updates(current_version: str | None = None) -> UpdateInfo:
 
     # Find the installer asset for this OS
     installer_url = ""
-    wanted = "instalador_windows.bat" if os.name == "nt" else "instalador_linux.sh"
+    # Prefer .exe on Windows, fall back to .bat
+    wanted_list = (["instalador_windows.exe", "instalador_windows.bat"]
+                   if os.name == "nt" else ["instalador_linux.sh"])
     for asset in data.get("assets", []):
-        if asset.get("name") == wanted:
+        name = asset.get("name", "")
+        if name in wanted_list:
             installer_url = asset.get("browser_download_url", "")
             break
 
@@ -150,18 +153,21 @@ def download_and_apply_update(installer_url: str) -> bool:
     if config_backup is not None:
         config_path.write_bytes(config_backup)
 
-    # 6. Update Python dependencies
+    # 6. Update Python dependencies (no console windows)
     venv_py = _find_venv_python()
     if venv_py:
         try:
+            si = _no_console_startupinfo()
             subprocess.run(
                 [str(venv_py), "-m", "pip", "install", "--upgrade", "pip"],
                 capture_output=True, timeout=120, cwd=str(CONF_DIR),
+                startupinfo=si,
             )
             subprocess.run(
                 [str(venv_py), "-m", "pip", "install", "-r",
                  str(CONF_DIR / "requirements.txt")],
                 capture_output=True, timeout=300, cwd=str(CONF_DIR),
+                startupinfo=si,
             )
         except Exception:
             pass  # non-fatal; the app will still work
@@ -170,6 +176,16 @@ def download_and_apply_update(installer_url: str) -> bool:
     shutil.rmtree(tmp_dir, ignore_errors=True)
     print("Update applied successfully.")
     return True
+
+
+def _no_console_startupinfo() -> "subprocess.STARTUPINFO | None":
+    """Return STARTUPINFO that hides the console window on Windows."""
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+        si.wShowWindow = subprocess.SW_HIDE  # type: ignore[attr-defined]
+        return si
+    return None
 
 
 def _find_venv_python() -> Path | None:

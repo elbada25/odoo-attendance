@@ -36,10 +36,16 @@ MARKER_DIR = SCRIPT_DIR / ".markers"
 LOG_FILE = SCRIPT_DIR / "attendance.log"
 ATTENDANCE_SCRIPT = SCRIPT_DIR / "odoo_attendance.py"
 
-# Reuse the same venv interpreter that runs this script.
 PYTHON_EXE = Path(sys.executable)
-# On Windows prefer pythonw (no console) for the child; on Linux keep python.
-PYTHONW_EXE = PYTHON_EXE.parent / ("pythonw.exe" if os.name == "nt" else "python")
+
+
+def _no_console_si():
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
+        si.wShowWindow = subprocess.SW_HIDE  # type: ignore[attr-defined]
+        return si
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +83,6 @@ def is_skip_day(config: dict) -> bool:
 
 
 def get_today_blocks(config: dict) -> list[tuple[str, str, str]]:
-    """Resolve today's blocks (same logic as odoo_attendance.get_today_blocks)."""
     sched = config.get("schedule", {})
     key = f"{date.today().month:02d}-{date.today().day:02d}"
     special = sched.get("special_days", {})
@@ -94,31 +99,31 @@ def mark_done() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dialog (tkinter, cross-platform)
+# Dialog (tkinter, cross-platform, themed)
 # ---------------------------------------------------------------------------
 def show_dialog(config: dict, update_url: str = "",
                 latest_version: str = "") -> str:
-    """Show the confirmation dialog. Returns 'fichar' | 'done' | 'cancel' | 'update'.
-
-    If *update_url* is given, an "Actualizar" button is shown.
-    """
+    """Show the confirmation dialog. Returns 'fichar' | 'done' | 'cancel' | 'update'."""
     import tkinter as tk
-    from tkinter import ttk
+    from theme import get_theme, fonts
+    from widgets import ModernButton
+
+    C = get_theme()
+    F = fonts()
 
     result = {"choice": "cancel"}
-
     has_update = bool(update_url)
-    dialog_h = 250 if has_update else 210
 
     root = tk.Tk()
     root.title("Fichaje Odoo")
-    root.geometry(f"460x{dialog_h}")
+    root.configure(bg=C["bg"])
     root.resizable(False, False)
-    # Center on screen
-    root.update_idletasks()
-    w, h = 460, dialog_h
-    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    w = 460
+    h = 280 if has_update else 220
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
     root.attributes("-topmost", True)
 
     try:
@@ -126,52 +131,52 @@ def show_dialog(config: dict, update_url: str = "",
     except Exception:
         pass
 
-    label = ttk.Label(
-        root,
-        text="\u00bfQuieres fichar la asistencia de hoy?",
-        font=("Segoe UI", 12) if os.name == "nt" else ("Sans", 12),
-        anchor="center",
-        justify="center",
-        padding=10,
-    )
-    label.pack(fill="x", pady=(18, 6))
-
-    # Update notification bar
-    if has_update:
-        update_frame = ttk.Frame(root)
-        update_frame.pack(fill="x", padx=12, pady=(0, 6))
-        update_label = ttk.Label(
-            update_frame,
-            text=f"Nueva version disponible: {latest_version}",
-            foreground="#0066cc",
-            font=("Segoe UI", 9, "bold") if os.name == "nt" else ("Sans", 9, "bold"),
-        )
-        update_label.pack(side="left", padx=2)
-        btn_update = ttk.Button(
-            update_frame,
-            text="Actualizar",
-            width=10,
-            command=lambda: choose("update"),
-        )
-        btn_update.pack(side="right", padx=6)
-
-    btn_frame = ttk.Frame(root)
-    btn_frame.pack(pady=8)
-
     def choose(value: str) -> None:
         result["choice"] = value
         root.destroy()
 
-    btn_fichar = ttk.Button(btn_frame, text="Fichar", width=12, command=lambda: choose("fichar"))
-    btn_fichar.pack(side="left", padx=6)
+    # ── Update bar (top) ──
+    if has_update:
+        bar = tk.Frame(root, bg=C["warning"], height=3)
+        bar.pack(fill="x", side="top")
+        update_frame = tk.Frame(root, bg=C["surface"])
+        update_frame.pack(fill="x", padx=20, pady=(12, 0))
+        inner = tk.Frame(update_frame, bg=C["surface"])
+        inner.pack(fill="x", padx=16, pady=10)
+        tk.Label(inner, text=f"Nueva version disponible  \u2022  {latest_version}",
+                 bg=C["surface"], fg=C["warning"], font=F["body_b"]).pack(
+            side="left")
+        ModernButton(inner, "Actualizar ahora", C, F, variant="warning",
+                     padx=14, pady=6,
+                     command=lambda: choose("update")).pack(side="right")
 
-    btn_done = ttk.Button(btn_frame, text="No preguntar m\u00e1s hoy", width=18, command=lambda: choose("done"))
-    btn_done.pack(side="left", padx=6)
+    # ── Main content ──
+    content = tk.Frame(root, bg=C["bg"])
+    top_pad = 24 if has_update else 32
+    content.pack(fill="both", expand=True, padx=36, pady=(top_pad, 12))
 
-    btn_cancel = ttk.Button(btn_frame, text="Ahora no", width=12, command=lambda: choose("cancel"))
-    btn_cancel.pack(side="left", padx=6)
+    tk.Label(content, text="\u00bfQuieres registrar tu asistencia de hoy?",
+             bg=C["bg"], fg=C["text"], font=F["body"]).pack(
+        anchor="center", pady=(0, 20))
 
-    # Force foreground focus
+    # ── Buttons ──
+    btn_row = tk.Frame(content, bg=C["bg"])
+    btn_row.pack(fill="x")
+
+    ModernButton(btn_row, "Fichar", C, F, variant="primary",
+                 command=lambda: choose("fichar")).pack(
+        side="left", padx=(0, 8), fill="x", expand=True)
+    ModernButton(btn_row, "No preguntar m\u00e1s hoy", C, F,
+                 command=lambda: choose("done")).pack(
+        side="left", padx=4, fill="x", expand=True)
+    ModernButton(btn_row, "Ahora no", C, F, variant="subtle",
+                 command=lambda: choose("cancel")).pack(
+        side="left", padx=(8, 0), fill="x", expand=True)
+
+    # ── Bottom divider ──
+    tk.Frame(root, bg=C["border"], height=1).pack(fill="x", side="bottom")
+
+    # Focus
     def _force_focus() -> None:
         root.deiconify()
         root.lift()
@@ -183,20 +188,17 @@ def show_dialog(config: dict, update_url: str = "",
     root.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
     root.mainloop()
 
-    # If user clicked "Actualizar", download and apply update
     if result["choice"] == "update" and update_url:
         import check_updates as _cu
         try:
             ok = _cu.download_and_apply_update(update_url)
             if ok:
                 import tkinter.messagebox as _mb
-                _mb.showinfo(
-                    "Actualizacion completada",
-                    "La aplicacion se ha actualizado correctamente.",
-                )
+                _mb.showinfo("Actualizacion completada",
+                             "La aplicacion se ha actualizado correctamente.")
         except Exception:
             pass
-        return "cancel"  # Don't block the normal flow
+        return "cancel"
 
     return result["choice"]
 
@@ -205,7 +207,6 @@ def show_dialog(config: dict, update_url: str = "",
 # Run the Selenium automation
 # ---------------------------------------------------------------------------
 def run_attendance(config: dict) -> int:
-    """Run odoo_attendance.py with the same interpreter. Returns exit code."""
     if not ATTENDANCE_SCRIPT.exists():
         write_log(f"ERROR: {ATTENDANCE_SCRIPT} not found.")
         return 1
@@ -213,11 +214,8 @@ def run_attendance(config: dict) -> int:
     write_log(f"Running: {' '.join(cmd)}")
     try:
         proc = subprocess.run(
-            cmd,
-            cwd=str(SCRIPT_DIR),
-            capture_output=True,
-            text=True,
-            timeout=600,
+            cmd, cwd=str(SCRIPT_DIR), capture_output=True, text=True,
+            timeout=600, startupinfo=_no_console_si(),
         )
     except subprocess.TimeoutExpired:
         write_log("ERROR: attendance script timed out.")
@@ -241,36 +239,31 @@ def main() -> int:
 
     write_log(f"Orchestrator triggered (day={weekday}, date={today})")
 
-    # 0) Master switch: if disabled in config, do nothing at all.
     if not config.get("behavior", {}).get("enabled", True):
         write_log("Attendance dialog disabled in config - nothing to do.")
         return 0
 
-    # 1) Skip configured weekdays (e.g. weekends)
     if is_skip_day(config):
         write_log("Skip-weekday - nothing to do.")
         return 0
 
-    # 2) Already handled today?
     MARKER_DIR.mkdir(parents=True, exist_ok=True)
     if today_marker_path().exists():
         write_log("Already done today - skipping.")
         return 0
 
-    # 3) No blocks scheduled today? Nothing to ask about.
     blocks = get_today_blocks(config)
     if not blocks:
         write_log("No blocks scheduled today - skipping dialog.")
         return 0
 
-    # 4) Check for updates (non-blocking, ~3s timeout)
     installer_url = ""
     latest_version = ""
     if config.get("behavior", {}).get("check_updates", True):
         import check_updates as _cu
         from version import get_version as _get_version
 
-        update_result: list = [None]  # mutable container for thread result
+        update_result: list = [None]
 
         def _check() -> None:
             try:
@@ -280,7 +273,7 @@ def main() -> int:
 
         t = threading.Thread(target=_check, daemon=True)
         t.start()
-        t.join(timeout=3)  # wait at most 3 seconds
+        t.join(timeout=3)
 
         if update_result[0] is not None and update_result[0].has_update:
             installer_url = update_result[0].installer_url
@@ -296,7 +289,7 @@ def main() -> int:
         return 0
     if choice == "done":
         mark_done()
-        write_log("User chose 'No preguntar m\u00e1s hoy' - marked done for today.")
+        write_log("User chose 'No preguntar mas hoy' - marked done for today.")
         return 0
     if choice == "fichar":
         rc = run_attendance(config)
