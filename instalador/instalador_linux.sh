@@ -337,7 +337,7 @@ zenity --info --title="Odoo Attendance" \
 exit 0
 
 ___ODOO_PAYLOAD_BEGIN___
-H4sIAB36i2oC/+y963bbRrIonN9cy+/QB1k5AhISIqmLHc7m7FEk2dYeWfInyePJVrQYkABFjECA
+H4sIABkJjGoC/+y963bbRrIonN9cy+/QB1k5AhISIqmLHc7m7FEk2dYeWfInyePJVrQYkABFjECA
 A4C6RKO19kOcZ/j+nR/fM+w32U/yVVVf0Ljx4tieyYy5EosEuqu7q6urq6qrqu1Ne/MPb537157j
 evFXn+TT5p+6v+321nb2HZ932t1O9yt2/9Vn+MyT1Imh+a/+NT/dF2ya+lOv33n+4vnOzotut2N3
 d3ef7zx/3vjqy+ef/jOKwrF/bafRNPhkbeCi3t3drVv/3W73+Vedne529/nz7Z3ODq7/zvPOV6z9

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -19,16 +19,18 @@ jobs:
           python-version: "3.12"
 
       - name: Generate installers
+        shell: pwsh
         run: |
           python generar_instaladores.py
           echo "=== Generated files ==="
-          ls -la instalador/
+          Get-ChildItem instalador/
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           files: |
+            instalador/instalador_windows.exe
             instalador/instalador_windows.bat
             instalador/instalador_linux.sh
           generate_release_notes: true

@@ -1188,6 +1188,9 @@ def main() -> None:
     cs_source = CS_LAUNCHER.replace("___VERSION___", _VERSION)
     cs_path.write_text(cs_source, encoding="utf-8")
 
+    # Always keep a .bat fallback alongside the .exe
+    _generate_bat_fallback(INSTALLER_DIR, ps_with_payload, _VERSION)
+
     csc = _find_csc()
     if csc:
         # Compile to a temporary exe
@@ -1209,7 +1212,6 @@ def main() -> None:
             print("ERROR de compilacion C#:")
             print("STDOUT:", result.stdout)
             print("STDERR:", result.stderr)
-            _generate_bat_fallback(INSTALLER_DIR, ps_with_payload, _VERSION)
         else:
             # Append the PowerShell + payload to the exe
             # The C# launcher reads its own file and searches for markers
@@ -1224,8 +1226,7 @@ def main() -> None:
             print(f"Generados:")
             print(f"  {exe_path}  ({exe_path.stat().st_size:,} bytes)")
     else:
-        print("ADVERTENCIA: csc.exe no encontrado. Generando .bat como fallback.")
-        _generate_bat_fallback(INSTALLER_DIR, ps_with_payload, _VERSION)
+        print("ADVERTENCIA: csc.exe no encontrado. Solo .bat generado.")
 
     print(f"  {INSTALLER_DIR / 'instalador_linux.sh'}  ({len(linux):,} bytes)")
     print(f"  Payload: {len(payload):,} chars base64 ({len(lines)} lineas)")
