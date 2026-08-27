@@ -163,9 +163,9 @@ def show_dialog(config: dict, update_url: str = "",
     btn_row = tk.Frame(content, bg=C["bg"])
     btn_row.pack(fill="x")
 
-    ModernButton(btn_row, "Fichar", C, F, variant="primary",
-                 command=lambda: choose("fichar")).pack(
-        side="left", padx=(0, 8), fill="x", expand=True)
+    btn_fichar = ModernButton(btn_row, "Fichar", C, F, variant="primary",
+                              command=lambda: choose("fichar"))
+    btn_fichar.pack(side="left", padx=(0, 8), fill="x", expand=True)
     ModernButton(btn_row, "No preguntar m\u00e1s hoy", C, F,
                  command=lambda: choose("done")).pack(
         side="left", padx=4, fill="x", expand=True)
@@ -176,11 +176,14 @@ def show_dialog(config: dict, update_url: str = "",
     # ── Bottom divider ──
     tk.Frame(root, bg=C["border"], height=1).pack(fill="x", side="bottom")
 
+    # Enter key triggers "Fichar" (default action)
+    root.bind("<Return>", lambda _e: choose("fichar"))
     # Focus
     def _force_focus() -> None:
         root.deiconify()
         root.lift()
         root.focus_force()
+        btn_fichar.focus_set()
         root.attributes("-topmost", True)
     root.after(100, _force_focus)
     root.after(250, _force_focus)
@@ -206,11 +209,13 @@ def show_dialog(config: dict, update_url: str = "",
 # ---------------------------------------------------------------------------
 # Run the Selenium automation
 # ---------------------------------------------------------------------------
-def run_attendance(config: dict) -> int:
+def run_attendance(config: dict, force_headless: bool = False) -> int:
     if not ATTENDANCE_SCRIPT.exists():
         write_log(f"ERROR: {ATTENDANCE_SCRIPT} not found.")
         return 1
     cmd = [str(PYTHON_EXE), str(ATTENDANCE_SCRIPT)]
+    if force_headless:
+        cmd.append("--headless")
     write_log(f"Running: {' '.join(cmd)}")
     try:
         proc = subprocess.run(
@@ -256,6 +261,18 @@ def main() -> int:
     if not blocks:
         write_log("No blocks scheduled today - skipping dialog.")
         return 0
+
+    # ── Auto-fichaje: skip dialog and fichar directly ──
+    if config.get("behavior", {}).get("auto_fichaje", False):
+        write_log("Auto-fichaje enabled - fiching without dialog.")
+        headless_mode = config.get("behavior", {}).get("auto_fichaje_headless", True)
+        rc = run_attendance(config, force_headless=headless_mode)
+        if rc == 0:
+            mark_done()
+            write_log("Auto-fichaje completed successfully - marked done for today.")
+        else:
+            write_log(f"Auto-fichaje failed (code {rc}) - NOT marked done.")
+        return rc
 
     installer_url = ""
     latest_version = ""

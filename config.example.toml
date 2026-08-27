@@ -32,6 +32,19 @@ skip_weekdays = [5, 6]
 # Check for new versions on GitHub when opening the configuration app.
 # Set to false to disable update checks.
 check_updates = true
+# Minimize the configuration app to the system tray instead of closing it.
+minimize_to_tray = false
+# Fichar automatically (without showing a dialog) at the configured time.
+# Requires the orchestrator to be running (unlock listener / task scheduler).
+auto_fichaje = false
+# Time for automatic fichaje in 24h format "HH:MM".
+auto_fichaje_time = "08:00"
+# Run auto-fichaje invisibly (Chrome without visible window).
+auto_fichaje_headless = true
+# Show a reminder notification if you haven't fichado by this time.
+reminder_enabled = false
+# Time for the daily reminder in 24h format "HH:MM".
+reminder_time = "09:30"
 
 # ---- Schedules ---------------------------------------------------------------
 # Each weekday key is a number: 0 = Monday ... 6 = Sunday
@@ -66,6 +79,6 @@ summer_months = [7, 8]
 
 # Special days: override the weekly schedule for specific dates.
 # Key format: "MM-DD" (month-day)
+# Add entries here or via the GUI ("Dias especiales" tab).
 [schedule.special_days]
-"12-24" = [["08:00", "12:00", "Trabajo"]]
-"12-31" = [["08:00", "12:00", "Trabajo"]]
+# (none by default)

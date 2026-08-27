@@ -50,6 +50,9 @@ NAV_ITEMS = [
     ("summer", "Horario verano"),
     ("special", "Dias especiales"),
     ("bulk", "Fichaje en masa"),
+    ("review", "Revision"),
+    ("delete", "Eliminar"),
+    ("correct", "Corregir"),
 ]
 
 
@@ -72,7 +75,17 @@ def default_config() -> dict:
             "headless": False,
             "user_data_dir": "",
         },
-        "behavior": {"enabled": True, "skip_weekdays": [5, 6], "check_updates": True},
+        "behavior": {
+            "enabled": True,
+            "skip_weekdays": [5, 6],
+            "check_updates": True,
+            "minimize_to_tray": False,
+            "auto_fichaje": False,
+            "auto_fichaje_time": "08:00",
+            "auto_fichaje_headless": True,
+            "reminder_enabled": False,
+            "reminder_time": "09:30",
+        },
         "schedule": {
             "summer_months": [7, 8],
             "summer": {str(i): [] for i in range(7)},
@@ -134,6 +147,13 @@ def save_config(cfg: dict) -> None:
         "[behavior]",
         f"enabled = {str(bool(beh.get('enabled', True))).lower()}",
         f"skip_weekdays = [{', '.join(str(int(x)) for x in beh.get('skip_weekdays', []))}]",
+        f"check_updates = {str(bool(beh.get('check_updates', True))).lower()}",
+        f"minimize_to_tray = {str(bool(beh.get('minimize_to_tray', False))).lower()}",
+        f"auto_fichaje = {str(bool(beh.get('auto_fichaje', False))).lower()}",
+        f"auto_fichaje_time = {_fmt_str(str(beh.get('auto_fichaje_time', '08:00')))}",
+        f"auto_fichaje_headless = {str(bool(beh.get('auto_fichaje_headless', True))).lower()}",
+        f"reminder_enabled = {str(bool(beh.get('reminder_enabled', False))).lower()}",
+        f"reminder_time = {_fmt_str(str(beh.get('reminder_time', '09:30')))}",
         "",
         "[schedule]",
         f"summer_months = [{', '.join(str(int(x)) for x in sched.get('summer_months', []))}]",
@@ -249,6 +269,10 @@ class ConfigApp:
         self._dirty = False
         self._canvases: list[tk.Canvas] = []
         self._current_nav = "general"
+        self._tray_icon = None
+        self._tray_thread = None
+        self._reminder_thread = None
+        self._reminder_stop = None
 
         self._style = ttk.Style()
         apply_ttk_theme(self._style, self.C)
@@ -433,6 +457,9 @@ class ConfigApp:
         self._build_schedule(self._page_inners["summer"], "summer")
         self._build_special(self._page_inners["special"])
         self._build_bulk(self._page_inners["bulk"])
+        self._build_review(self._page_inners["review"])
+        self._build_delete(self._page_inners["delete"])
+        self._build_correct(self._page_inners["correct"])
 
         self._show_page("general")
 
@@ -573,6 +600,11 @@ class ConfigApp:
         self._enabled = BooleanVar(value=bool(beh.get("enabled", True)))
         ModernCheck(pad, "Activar dialogo de fichaje al desbloquear el PC",
                     self._enabled, C, F,
+                    command=self._mark_dirty).pack(anchor="w", pady=(0, 10))
+
+        self._check_updates = BooleanVar(value=bool(beh.get("check_updates", True)))
+        ModernCheck(pad, "Comprobar actualizaciones automaticamente",
+                    self._check_updates, C, F,
                     command=self._mark_dirty).pack(anchor="w", pady=(0, 18))
 
         ttk.Label(pad, text="Dias en los que NO preguntar",
@@ -600,6 +632,47 @@ class ConfigApp:
                   style="Surface.TLabel", font=F["helper"],
                   foreground=C["text_dis"]).pack(anchor="w", pady=(2, 0))
         self._summer_months.trace_add("write", self._mark_dirty)
+
+        # ── System tray ──
+        self._section_title(pad, "Bandeja del sistema y automatizacion")
+
+        self._minimize_tray = BooleanVar(value=bool(beh.get("minimize_to_tray", False)))
+        ModernCheck(pad, "Minimizar a la bandeja del sistema al cerrar",
+                    self._minimize_tray, C, F,
+                    command=self._mark_dirty).pack(anchor="w", pady=(0, 14))
+
+        self._auto_fichaje = BooleanVar(value=bool(beh.get("auto_fichaje", False)))
+        ModernCheck(pad, "Fichar automaticamente (sin preguntar)",
+                    self._auto_fichaje, C, F,
+                    command=self._mark_dirty).pack(anchor="w", pady=(0, 4))
+
+        auto_time_frame = tk.Frame(pad, bg=C["surface"])
+        auto_time_frame.pack(anchor="w", pady=(0, 14))
+        ttk.Label(auto_time_frame, text="Hora del auto-fichaje",
+                  style="Surface.TLabel", font=F["label"],
+                  foreground=C["text_sec"]).pack(side=LEFT, padx=(0, 8))
+        self._auto_fichaje_time = StringVar(value=str(beh.get("auto_fichaje_time", "08:00")))
+        TimeEntry(auto_time_frame, self._auto_fichaje_time, C, F, width=8).pack(side=LEFT)
+        self._auto_fichaje_time.trace_add("write", self._mark_dirty)
+
+        self._auto_fichaje_headless = BooleanVar(value=bool(beh.get("auto_fichaje_headless", True)))
+        ModernCheck(pad, "Fichar de forma invisible (sin ventana de Chrome)",
+                    self._auto_fichaje_headless, C, F,
+                    command=self._mark_dirty).pack(anchor="w", pady=(4, 14))
+
+        self._reminder_enabled = BooleanVar(value=bool(beh.get("reminder_enabled", False)))
+        ModernCheck(pad, "Recordatorio diario si no he fichado",
+                    self._reminder_enabled, C, F,
+                    command=self._mark_dirty).pack(anchor="w", pady=(0, 4))
+
+        reminder_time_frame = tk.Frame(pad, bg=C["surface"])
+        reminder_time_frame.pack(anchor="w", pady=(0, 14))
+        ttk.Label(reminder_time_frame, text="Hora del recordatorio",
+                  style="Surface.TLabel", font=F["label"],
+                  foreground=C["text_sec"]).pack(side=LEFT, padx=(0, 8))
+        self._reminder_time = StringVar(value=str(beh.get("reminder_time", "09:30")))
+        TimeEntry(reminder_time_frame, self._reminder_time, C, F, width=8).pack(side=LEFT)
+        self._reminder_time.trace_add("write", self._mark_dirty)
 
     # ── Schedule pages ────────────────────────────────────────────────────
     def _day_card(self, parent, title: str) -> tk.Frame:
@@ -906,6 +979,350 @@ class ConfigApp:
 
         threading.Thread(target=run, daemon=True).start()
 
+    # ── Review page ───────────────────────────────────────────────────────
+    def _build_review(self, parent) -> None:
+        C, F = self.C, self.F
+        pad = ttk.Frame(parent, style="Surface.TFrame")
+        pad.pack(fill=BOTH, expand=True, padx=32, pady=(8, 24))
+
+        self._section_title(pad, "Revision de fichajes")
+
+        ttk.Label(pad, text=(
+            "Comprueba si te has dejado algun dia por fichar en los ultimos 200 dias.\n"
+            "Si hay dias faltantes, puedes ficharlos todos a la vez."
+        ), style="Surface.TLabel", font=F["body"],
+            foreground=C["text_sec"]).pack(anchor="w", pady=(0, 16))
+
+        btn_frame = tk.Frame(pad, bg=C["surface"])
+        btn_frame.pack(fill=X, pady=(0, 12))
+        ModernButton(btn_frame, "Comprobar dias faltantes", C, F,
+                     variant="primary", command=self._review_check,
+                     padx=14, pady=6).pack(side=LEFT, padx=(0, 8))
+        ModernButton(btn_frame, "Fichar dias faltantes", C, F,
+                     command=self._review_fichar_missing,
+                     padx=14, pady=6).pack(side=LEFT)
+
+        ttk.Label(pad, text="Resultado",
+                  style="Surface.TLabel", font=F["body_b"],
+                  foreground=C["text"]).pack(anchor="w", pady=(8, 4))
+        self._review_result = tk.Text(
+            pad, height=14, font=F["mono"],
+            bg=C["code_bg"], fg=C["code_text"], relief="flat",
+            borderwidth=0, padx=12, pady=10, state="disabled",
+            highlightthickness=1, highlightbackground=C["border"],
+            highlightcolor=C["border"])
+        self._review_result.pack(fill=BOTH, expand=True)
+
+        self._missing_days: list = []
+
+    def _review_check(self) -> None:
+        C, F = self.C, self.F
+        if self._dirty:
+            if not messagebox.askyesno("Cambios sin guardar",
+                "Hay cambios sin guardar. Guardar antes de comprobar?"):
+                return
+            self._save()
+
+        win = tk.Toplevel(self.root)
+        win.title("Comprobando...")
+        win.geometry("500x100")
+        win.transient(self.root)
+        win.configure(bg=C["surface"])
+        ttk.Label(win, text="Consultando Odoo...\nEsto puede tardar un minuto.",
+                  padding=24, font=F["body"], anchor="center").pack(expand=True)
+
+        def run() -> None:
+            try:
+                cmd = [str(PYTHON_EXE), str(ATTENDANCE_SCRIPT), "--check-missing"]
+                proc = subprocess.run(
+                    cmd, cwd=str(SCRIPT_DIR), capture_output=True, text=True,
+                    timeout=300, startupinfo=_no_console_si())
+                output = proc.stdout or ""
+            except subprocess.TimeoutExpired:
+                output = "TIMEOUT."
+            except Exception as exc:
+                output = f"ERROR: {exc}"
+
+            # Parse JSON from output
+            missing = []
+            for line in output.splitlines():
+                if line.strip().startswith("["):
+                    try:
+                        import json as _json
+                        missing = [
+                            dt.strptime(d, "%Y-%m-%d").date()
+                            for d in _json.loads(line.strip())
+                        ]
+                        break
+                    except Exception:
+                        pass
+
+            self._missing_days = missing
+            self.root.after(0, lambda: self._review_show_result(output, missing, win))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _review_show_result(self, output, missing, win) -> None:
+        win.destroy()
+        self._review_result.configure(state="normal")
+        self._review_result.delete("1.0", END)
+        if missing:
+            lines = [f"Dias faltantes: {len(missing)}\n", "-" * 50]
+            for d in missing:
+                wd = WEEKDAYS_FULL[d.weekday()]
+                lines.append(f"  {d} ({wd})")
+            lines.append(f"\n\nPulsa 'Fichar dias faltantes' para registrarlos.")
+            self._review_result.insert("1.0", "\n".join(lines))
+        else:
+            self._review_result.insert("1.0",
+                "No hay dias faltantes. Todos los fichajes estan al dia.")
+        self._review_result.configure(state="disabled")
+
+    def _review_fichar_missing(self) -> None:
+        if not self._missing_days:
+            messagebox.showinfo("Revision",
+                "No hay dias faltantes. Pulsa 'Comprobar' primero.")
+            return
+        days = self._missing_days
+        msg = (f"Se van a fichar {len(days)} dia(s) faltantes.\n\n"
+               "Se registrara la asistencia via API.\n\nContinuar?")
+        if not messagebox.askyesno("Fichar dias faltantes", msg):
+            return
+
+        # Use bulk with the missing days as a range, excluding non-missing
+        start = min(days)
+        end = max(days)
+        # Build exclude list: all days in range that are NOT in missing
+        from datetime import timedelta
+        all_missing = set(days)
+        excluded = []
+        current = start
+        while current <= end:
+            if current not in all_missing:
+                excluded.append(current)
+            current += timedelta(days=1)
+
+        C, F = self.C, self.F
+        win = tk.Toplevel(self.root)
+        win.title("Fichando dias faltantes...")
+        win.geometry("620x420")
+        win.transient(self.root)
+        win.configure(bg=C["surface"])
+        txt = scrolledtext.ScrolledText(
+            win, width=72, height=20, font=F["mono"],
+            bg=C["code_bg"], fg=C["code_text"], relief="flat", borderwidth=0,
+            padx=12, pady=12)
+        txt.pack(fill=BOTH, expand=True)
+        txt.insert(END, f"Fichando {len(days)} dia(s) faltantes...\n\n")
+        txt.configure(state="disabled")
+
+        def run() -> None:
+            try:
+                cmd = [str(PYTHON_EXE), str(ATTENDANCE_SCRIPT), "--bulk",
+                       start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"),
+                       "--exclude",
+                       ",".join(d.strftime("%Y-%m-%d") for d in excluded)]
+                proc = subprocess.run(
+                    cmd, cwd=str(SCRIPT_DIR), capture_output=True, text=True,
+                    timeout=1800, startupinfo=_no_console_si())
+                msg = (proc.stdout or "") + (
+                    "\n--- stderr ---\n" + proc.stderr if proc.stderr else "")
+                msg += f"\n[exit code {proc.returncode}]"
+            except subprocess.TimeoutExpired:
+                msg = "TIMEOUT."
+            except Exception as exc:
+                msg = f"ERROR: {exc}"
+            txt.configure(state="normal")
+            txt.insert(END, msg + "\n")
+            txt.configure(state="disabled")
+            txt.see(END)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── Delete page ───────────────────────────────────────────────────────
+    def _build_delete(self, parent) -> None:
+        C, F = self.C, self.F
+        pad = ttk.Frame(parent, style="Surface.TFrame")
+        pad.pack(fill=BOTH, expand=True, padx=32, pady=(8, 24))
+
+        self._section_title(pad, "Eliminar fichajes")
+
+        ttk.Label(pad, text=(
+            "Borra los fichajes existentes en un rango de fechas.\n"
+            "Esta accion no se puede deshacer."
+        ), style="Surface.TLabel", font=F["body"],
+            foreground=C["text_sec"]).pack(anchor="w", pady=(0, 16))
+
+        range_frame = tk.Frame(pad, bg=C["surface"])
+        range_frame.pack(fill=X, pady=(0, 16))
+        ttk.Label(range_frame, text="Desde", style="Surface.TLabel",
+                  font=F["label"], foreground=C["text_sec"]).pack(anchor="w")
+        today_str = date.today().strftime("%Y-%m-%d")
+        self._del_start = StringVar(value=today_str)
+        DateEntry(range_frame, self._del_start, C, F, width=14).pack(
+            anchor="w", pady=(4, 12))
+        ttk.Label(range_frame, text="Hasta", style="Surface.TLabel",
+                  font=F["label"], foreground=C["text_sec"]).pack(anchor="w")
+        self._del_end = StringVar(value=today_str)
+        DateEntry(range_frame, self._del_end, C, F, width=14).pack(
+            anchor="w", pady=(4, 0))
+
+        btn_frame = tk.Frame(pad, bg=C["surface"])
+        btn_frame.pack(fill=X)
+        ModernButton(btn_frame, "Eliminar fichajes", C, F,
+                     variant="primary", command=self._delete_range,
+                     padx=14, pady=6).pack(side=LEFT)
+
+    def _delete_range(self) -> None:
+        C, F = self.C, self.F
+        if self._dirty:
+            if not messagebox.askyesno("Cambios sin guardar",
+                "Hay cambios sin guardar. Guardar antes de continuar?"):
+                return
+            self._save()
+
+        try:
+            start = dt.strptime(self._del_start.get().strip(), "%Y-%m-%d").date()
+            end = dt.strptime(self._del_end.get().strip(), "%Y-%m-%d").date()
+        except ValueError:
+            messagebox.showerror("Error", "Formato de fecha invalido. Usa YYYY-MM-DD.")
+            return
+        if start > end:
+            messagebox.showerror("Error",
+                "La fecha de inicio no puede ser posterior a la de fin.")
+            return
+
+        if not messagebox.askyesno("Eliminar fichajes",
+            f"Se van a eliminar todos los fichajes entre {start} y {end}.\n\n"
+            "Esta accion NO se puede deshacer.\n\nContinuar?"):
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Eliminando fichajes...")
+        win.geometry("620x420")
+        win.transient(self.root)
+        win.configure(bg=C["surface"])
+        txt = scrolledtext.ScrolledText(
+            win, width=72, height=20, font=F["mono"],
+            bg=C["code_bg"], fg=C["code_text"], relief="flat", borderwidth=0,
+            padx=12, pady=12)
+        txt.pack(fill=BOTH, expand=True)
+        txt.insert(END, f"Eliminando fichajes {start} a {end}...\n\n")
+        txt.configure(state="disabled")
+
+        def run() -> None:
+            try:
+                cmd = [str(PYTHON_EXE), str(ATTENDANCE_SCRIPT), "--delete",
+                       start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")]
+                proc = subprocess.run(
+                    cmd, cwd=str(SCRIPT_DIR), capture_output=True, text=True,
+                    timeout=600, startupinfo=_no_console_si())
+                msg = (proc.stdout or "") + (
+                    "\n--- stderr ---\n" + proc.stderr if proc.stderr else "")
+                msg += f"\n[exit code {proc.returncode}]"
+            except subprocess.TimeoutExpired:
+                msg = "TIMEOUT."
+            except Exception as exc:
+                msg = f"ERROR: {exc}"
+            txt.configure(state="normal")
+            txt.insert(END, msg + "\n")
+            txt.configure(state="disabled")
+            txt.see(END)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── Correct page ──────────────────────────────────────────────────────
+    def _build_correct(self, parent) -> None:
+        C, F = self.C, self.F
+        pad = ttk.Frame(parent, style="Surface.TFrame")
+        pad.pack(fill=BOTH, expand=True, padx=32, pady=(8, 24))
+
+        self._section_title(pad, "Corregir fichajes")
+
+        ttk.Label(pad, text=(
+            "Borra y vuelve a crear los fichajes entre dos fechas segun tu horario.\n"
+            "Util para corregir fichajes con horas incorrectas o state='draft'."
+        ), style="Surface.TLabel", font=F["body"],
+            foreground=C["text_sec"]).pack(anchor="w", pady=(0, 16))
+
+        range_frame = tk.Frame(pad, bg=C["surface"])
+        range_frame.pack(fill=X, pady=(0, 16))
+        ttk.Label(range_frame, text="Desde", style="Surface.TLabel",
+                  font=F["label"], foreground=C["text_sec"]).pack(anchor="w")
+        today_str = date.today().strftime("%Y-%m-%d")
+        self._cor_start = StringVar(value=today_str)
+        DateEntry(range_frame, self._cor_start, C, F, width=14).pack(
+            anchor="w", pady=(4, 12))
+        ttk.Label(range_frame, text="Hasta", style="Surface.TLabel",
+                  font=F["label"], foreground=C["text_sec"]).pack(anchor="w")
+        self._cor_end = StringVar(value=today_str)
+        DateEntry(range_frame, self._cor_end, C, F, width=14).pack(
+            anchor="w", pady=(4, 0))
+
+        btn_frame = tk.Frame(pad, bg=C["surface"])
+        btn_frame.pack(fill=X)
+        ModernButton(btn_frame, "Corregir fichajes", C, F,
+                     variant="primary", command=self._correct_range,
+                     padx=14, pady=6).pack(side=LEFT)
+
+    def _correct_range(self) -> None:
+        C, F = self.C, self.F
+        if self._dirty:
+            if not messagebox.askyesno("Cambios sin guardar",
+                "Hay cambios sin guardar. Guardar antes de continuar?"):
+                return
+            self._save()
+
+        try:
+            start = dt.strptime(self._cor_start.get().strip(), "%Y-%m-%d").date()
+            end = dt.strptime(self._cor_end.get().strip(), "%Y-%m-%d").date()
+        except ValueError:
+            messagebox.showerror("Error", "Formato de fecha invalido. Usa YYYY-MM-DD.")
+            return
+        if start > end:
+            messagebox.showerror("Error",
+                "La fecha de inicio no puede ser posterior a la de fin.")
+            return
+
+        if not messagebox.askyesno("Corregir fichajes",
+            f"Se van a borrar y recrear los fichajes entre {start} y {end}.\n\n"
+            "Se usara el horario configurado (normal o verano).\n\nContinuar?"):
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Corrigiendo fichajes...")
+        win.geometry("620x420")
+        win.transient(self.root)
+        win.configure(bg=C["surface"])
+        txt = scrolledtext.ScrolledText(
+            win, width=72, height=20, font=F["mono"],
+            bg=C["code_bg"], fg=C["code_text"], relief="flat", borderwidth=0,
+            padx=12, pady=12)
+        txt.pack(fill=BOTH, expand=True)
+        txt.insert(END, f"Corrigiendo fichajes {start} a {end}...\n\n")
+        txt.configure(state="disabled")
+
+        def run() -> None:
+            try:
+                cmd = [str(PYTHON_EXE), str(ATTENDANCE_SCRIPT), "--correct",
+                       start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")]
+                proc = subprocess.run(
+                    cmd, cwd=str(SCRIPT_DIR), capture_output=True, text=True,
+                    timeout=1800, startupinfo=_no_console_si())
+                msg = (proc.stdout or "") + (
+                    "\n--- stderr ---\n" + proc.stderr if proc.stderr else "")
+                msg += f"\n[exit code {proc.returncode}]"
+            except subprocess.TimeoutExpired:
+                msg = "TIMEOUT."
+            except Exception as exc:
+                msg = f"ERROR: {exc}"
+            txt.configure(state="normal")
+            txt.insert(END, msg + "\n")
+            txt.configure(state="disabled")
+            txt.see(END)
+
+        threading.Thread(target=run, daemon=True).start()
+
     # ── Actions ───────────────────────────────────────────────────────────
     def _mark_dirty(self, *_args) -> None:
         self._dirty = True
@@ -921,6 +1338,13 @@ class ConfigApp:
         cfg["behavior"]["skip_weekdays"] = [
             i for i, v in enumerate(self._skip_vars) if v.get()
         ]
+        cfg["behavior"]["check_updates"] = self._check_updates.get()
+        cfg["behavior"]["minimize_to_tray"] = self._minimize_tray.get()
+        cfg["behavior"]["auto_fichaje"] = self._auto_fichaje.get()
+        cfg["behavior"]["auto_fichaje_time"] = self._auto_fichaje_time.get().strip()
+        cfg["behavior"]["auto_fichaje_headless"] = self._auto_fichaje_headless.get()
+        cfg["behavior"]["reminder_enabled"] = self._reminder_enabled.get()
+        cfg["behavior"]["reminder_time"] = self._reminder_time.get().strip()
         sm_raw = [m.strip() for m in self._summer_months.get().split(",") if m.strip()]
         try:
             cfg["schedule"]["summer_months"] = [int(m) for m in sm_raw]
@@ -1048,11 +1472,165 @@ class ConfigApp:
                 "No se pudo completar la actualizacion.")
 
     def _on_close(self) -> None:
+        # If minimize_to_tray is enabled (check live var, not stale cfg),
+        # hide instead of destroy
+        if getattr(self, "_minimize_tray", None) and self._minimize_tray.get():
+            self._hide_to_tray()
+            return
+        self._quit_app()
+
+    def _quit_app(self) -> None:
         if self._dirty:
             if not messagebox.askyesno("Salir",
                 "Hay cambios sin guardar. Salir de todos modos?"):
                 return
+        self._stop_tray()
         self.root.destroy()
+
+    # ── System tray ──────────────────────────────────────────────────────
+    def _hide_to_tray(self) -> None:
+        """Hide the window and show a system tray icon."""
+        self.root.withdraw()
+        if self._tray_icon is None:
+            self._setup_tray_icon()
+        self._start_reminder_checker()
+
+    def _setup_tray_icon(self) -> None:
+        """Create the pystray icon with a menu."""
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except ImportError:
+            # pystray not available - just quit
+            self.root.deiconify()
+            messagebox.showwarning("Bandeja del sistema",
+                "El modulo pystray no esta instalado.\n"
+                "No se puede minimizar a la bandeja del sistema.")
+            self._quit_app()
+            return
+
+        # Create a simple icon (a filled circle)
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse((12, 12, 52, 52), fill=self._tray_icon_color())
+
+        def _on_show(icon, item):
+            self.root.after(0, self._restore_from_tray)
+
+        def _on_fichar(icon, item):
+            def _do_fichar():
+                # Restore window first so dialogs are visible
+                if not self.root.winfo_viewable():
+                    self._restore_from_tray()
+                self._fichar_ahora()
+            self.root.after(0, _do_fichar)
+
+        def _on_quit(icon, item):
+            self.root.after(0, self._quit_app)
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Mostrar", _on_show, default=True),
+            pystray.MenuItem("Fichar ahora", _on_fichar),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Salir", _on_quit),
+        )
+        self._tray_icon = pystray.Icon("odoo-attendance", img,
+                                       "Odoo Attendance", menu)
+        # Run tray icon in a separate thread
+        self._tray_thread = threading.Thread(
+            target=self._tray_icon.run, daemon=True)
+        self._tray_thread.start()
+
+    def _tray_icon_color(self):
+        """Return a color for the tray icon based on theme."""
+        if self._dark:
+            return (180, 180, 180, 255)
+        return (60, 60, 60, 255)
+
+    def _restore_from_tray(self) -> None:
+        """Restore the window from the system tray."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self._stop_reminder_checker()
+
+    def _stop_tray(self) -> None:
+        """Stop the tray icon if it's running."""
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+        self._stop_reminder_checker()
+
+    # ── Reminder checker ─────────────────────────────────────────────────
+    def _start_reminder_checker(self) -> None:
+        """Start a background thread that checks if today's fichaje is done."""
+        if self._reminder_thread is not None:
+            return  # already running
+        if not self.cfg.get("behavior", {}).get("reminder_enabled", False):
+            return
+        self._reminder_stop = threading.Event()
+        self._reminder_thread = threading.Thread(
+            target=self._reminder_loop, daemon=True)
+        self._reminder_thread.start()
+
+    def _stop_reminder_checker(self) -> None:
+        """Stop the reminder checker thread."""
+        if self._reminder_thread is not None:
+            self._reminder_stop.set()
+            self._reminder_thread = None
+
+    def _reminder_loop(self) -> None:
+        """Check every 5 minutes if today's fichaje is pending."""
+        from datetime import datetime as _dt
+        reminder_time_str = self.cfg.get("behavior", {}).get(
+            "reminder_time", "09:30")
+        try:
+            rh, rm = reminder_time_str.split(":")
+            rh, rm = int(rh), int(rm)
+        except (ValueError, AttributeError):
+            rh, rm = 9, 30
+
+        notified_date = None  # track which day we already notified for
+
+        while not self._reminder_stop.wait(timeout=300):  # 5 min
+            now = _dt.now()
+            today = date.today()
+            # Only after reminder time
+            if now.hour < rh or (now.hour == rh and now.minute < rm):
+                continue
+            # Only on working days
+            skip = set(self.cfg.get("behavior", {}).get("skip_weekdays", []))
+            if today.weekday() in skip:
+                continue
+            # Check if today has blocks
+            try:
+                import odoo_attendance as _m
+                blocks = _m.get_today_blocks(today, self.cfg)
+            except Exception:
+                blocks = []
+            if not blocks:
+                continue
+            # Check if already done (recompute each iteration for correct day)
+            marker = SCRIPT_DIR / ".markers" / f"{today.isoformat()}.done"
+            if marker.exists():
+                continue
+            # Show notification once per day
+            if notified_date != today:
+                self._show_tray_notification()
+                notified_date = today
+
+    def _show_tray_notification(self) -> None:
+        """Show a notification via the tray icon."""
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.notify(
+                    "No has fichado hoy. Recuerda registrar tu asistencia.",
+                    "Odoo Attendance")
+            except Exception:
+                pass
 
     def run(self) -> None:
         self.root.mainloop()

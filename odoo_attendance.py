@@ -192,9 +192,16 @@ def login(driver: webdriver.Chrome, url: str, username: str, password: str, time
         except TimeoutException as exc:
             raise RuntimeError("Login submit button not available.") from exc
 
-    # Confirm login by waiting for the web client to load
+    # Confirm login by waiting for the web client to load.
+    # In headless mode, the dashboard may take longer to render, so we
+    # check multiple indicators: the web client body class, the URL
+    # changing away from /web/login, or the login form disappearing.
     try:
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "body.o_web_client")))
+        wait.until(lambda d: (
+            d.find_elements(By.CSS_SELECTOR, "body.o_web_client")
+            or ("/web/login" not in d.current_url
+                and not d.find_elements(By.NAME, "password"))
+        ))
     except TimeoutException as exc:
         raise RuntimeError("Login failed or dashboard did not load.") from exc
 
@@ -567,14 +574,14 @@ def create_today_attendance(driver: webdriver.Chrome, timeout: int = 20) -> int:
     return len(blocks)
 
 
-def main() -> int:
+def main(force_headless: bool = False) -> int:
     config = load_config()
     odoo = config.get("odoo", {})
 
     url = str(odoo.get("url", "")).strip()
     username = str(odoo.get("username", "")).strip()
     password = str(odoo.get("password", "")).strip()
-    headless = bool(odoo.get("headless", False))
+    headless = bool(odoo.get("headless", False)) or force_headless
     user_data_dir = str(odoo.get("user_data_dir", "")).strip() or None
 
     if not url or not username or not password:
@@ -860,12 +867,15 @@ def _rpc_create_attendance(
         #    Send check_in/check_out as UTC so the record is "closed"
         #    (both check_in and check_out set), preventing the
         #    "employee has not checked out" error on subsequent days.
+        #    state='confirmed' is required so that worked_hours/productive_hours
+        #    are computed (in 'draft' state they stay at 0).
         first_cat = cat_map.get(blocks[0][2], 1)
         vals = {
             "employee_id": employee_id,
             "check_in": _local_to_utc_str(date_str, blocks[0][0]),
             "check_out": _local_to_utc_str(date_str, blocks[-1][1]),
             "category_id": first_cat,
+            "state": "confirmed",
             "day_block_ids": [(6, 0, day_block_ids)],
         }
         _rpc_call(session, base_url, "hr.attendance", "create", [vals])
@@ -937,7 +947,7 @@ def run_bulk(start_date: date, end_date: date, config: dict | None = None,
 
     try:
         base_url = _get_base_url(url)
-        driver = create_driver(headless=headless, user_data_dir=user_data_dir)
+        driver = create_driver(headless=True, user_data_dir=user_data_dir)
     except (RuntimeError, WebDriverException) as exc:
         print(str(exc))
         return 1
@@ -977,6 +987,280 @@ def run_bulk(start_date: date, end_date: date, config: dict | None = None,
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}")
         return 1
+
+
+# ---------------------------------------------------------------------------
+# RPC helpers: query, delete, find-missing, correct
+# ---------------------------------------------------------------------------
+def _rpc_login_and_get_session(config: dict, force_headless: bool = False):
+    """Login to Odoo via Selenium and return (rpc_session, base_url, driver).
+
+    The caller is responsible for closing the driver.
+    If *force_headless* is True, Chrome runs without a visible window
+    regardless of the config setting.
+    """
+    odoo = config.get("odoo", {})
+    url = str(odoo.get("url", "")).strip()
+    username = str(odoo.get("username", "")).strip()
+    password = str(odoo.get("password", "")).strip()
+    headless = bool(odoo.get("headless", False)) or force_headless
+    user_data_dir = str(odoo.get("user_data_dir", "")).strip() or None
+
+    if not url or not username or not password:
+        raise RuntimeError("Missing odoo.url, odoo.username, or odoo.password in config.toml.")
+
+    base_url = _get_base_url(url)
+    driver = create_driver(headless=headless, user_data_dir=user_data_dir)
+    try:
+        login(driver, url, username, password)
+    except Exception:
+        driver.quit()
+        raise
+    rpc_sess = _get_rpc_session(driver)
+    return rpc_sess, base_url, driver
+
+
+def _rpc_find_attendances(session, base_url: str, employee_id: int,
+                          start_date: date, end_date: date) -> dict:
+    """Return {date_obj: [{id, check_in, check_out, worked_hours, state}, ...]}.
+
+    Searches hr.attendance for the given employee where check_in falls within
+    [start_date, end_date] in the employee's local timezone.
+    """
+    # Build UTC bounds: start_date 00:00 local -> UTC, end_date 23:59 local -> UTC
+    start_utc = _local_to_utc_str(start_date.strftime("%Y-%m-%d"), "00:00")
+    end_utc = _local_to_utc_str(end_date.strftime("%Y-%m-%d"), "23:59")
+
+    records = _rpc_call(session, base_url, "hr.attendance", "search_read",
+                        [[("employee_id", "=", employee_id),
+                          ("check_in", ">=", start_utc),
+                          ("check_in", "<=", end_utc)]],
+                        {"fields": ["id", "check_in", "check_out", "worked_hours",
+                                    "state", "date"],
+                         "order": "check_in asc"})
+
+    # Group by the 'date' field (which Odoo computes in the employee's tz)
+    by_date: dict[date, list[dict]] = {}
+    for r in (records or []):
+        d_str = r.get("date")
+        if not d_str:
+            continue
+        try:
+            d = date.fromisoformat(d_str) if isinstance(d_str, str) else d_str
+        except (ValueError, TypeError):
+            continue
+        by_date.setdefault(d, []).append(r)
+    return by_date
+
+
+def _rpc_delete_attendances(session, base_url: str, attendance_ids: list[int]) -> int:
+    """Delete attendance records. Sets state='draft' first (Odoo blocks
+    deletion of confirmed records for non-admins). Returns count deleted."""
+    if not attendance_ids:
+        return 0
+    # Set to draft first so non-admins can delete
+    try:
+        _rpc_call(session, base_url, "hr.attendance", "write",
+                  [attendance_ids, {"state": "draft"}])
+    except Exception:
+        pass  # may fail if already draft or if user is admin
+    _rpc_call(session, base_url, "hr.attendance", "unlink", [attendance_ids])
+    return len(attendance_ids)
+
+
+def run_delete_range(start_date: date, end_date: date,
+                     config: dict | None = None) -> int:
+    """Delete all attendance records for the configured employee in [start, end]."""
+    if config is None:
+        config = load_config()
+    if start_date > end_date:
+        print("La fecha de inicio no puede ser posterior a la fecha de fin.")
+        return 1
+
+    print(f"Eliminando fichajes entre {start_date} y {end_date}...")
+    try:
+        rpc_sess, base_url, driver = _rpc_login_and_get_session(config, force_headless=True)
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        return 1
+
+    try:
+        username = str(config.get("odoo", {}).get("username", "")).strip()
+        emp_id = _rpc_resolve_employee(rpc_sess, base_url, username=username)
+        by_date = _rpc_find_attendances(rpc_sess, base_url, emp_id,
+                                        start_date, end_date)
+        all_ids: list[int] = []
+        for d, recs in sorted(by_date.items()):
+            ids = [r["id"] for r in recs]
+            all_ids.extend(ids)
+            print(f"  {d}: {len(ids)} registro(s) a eliminar")
+
+        if not all_ids:
+            print("No se encontraron fichajes en el rango especificado.")
+            return 0
+
+        print(f"\nTotal a eliminar: {len(all_ids)} registro(s)")
+        deleted = _rpc_delete_attendances(rpc_sess, base_url, all_ids)
+        print(f"Eliminados: {deleted} registro(s).")
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def run_correct_range(start_date: date, end_date: date,
+                      config: dict | None = None) -> int:
+    """Delete and recreate attendance records for [start, end] based on schedule."""
+    if config is None:
+        config = load_config()
+    if start_date > end_date:
+        print("La fecha de inicio no puede ser posterior a la fecha de fin.")
+        return 1
+
+    skip_weekdays = set(config.get("behavior", {}).get("skip_weekdays", []))
+    from datetime import timedelta
+
+    # Build the list of days to correct (must have blocks)
+    days_to_process: list[tuple[date, list[tuple[str, str, str]]]] = []
+    current = start_date
+    while current <= end_date:
+        if current.weekday() not in skip_weekdays:
+            blocks = get_today_blocks(current, config)
+            if blocks:
+                days_to_process.append((current, blocks))
+        current += timedelta(days=1)
+
+    if not days_to_process:
+        print("No hay dias con fichajes programados en el rango seleccionado.")
+        return 0
+
+    print(f"Corrigiendo {len(days_to_process)} dia(s) entre {start_date} y {end_date}...")
+    try:
+        rpc_sess, base_url, driver = _rpc_login_and_get_session(config, force_headless=True)
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        return 1
+
+    try:
+        username = str(config.get("odoo", {}).get("username", "")).strip()
+        emp_id = _rpc_resolve_employee(rpc_sess, base_url, username=username)
+
+        # Find all existing attendances in the range
+        by_date = _rpc_find_attendances(rpc_sess, base_url, emp_id,
+                                        start_date, end_date)
+
+        success_count = 0
+        fail_count = 0
+        for i, (target_date, blocks) in enumerate(days_to_process, 1):
+            weekday_name = ["Lunes", "Martes", "Miercoles", "Jueves",
+                            "Viernes", "Sabado", "Domingo"][target_date.weekday()]
+            print(f"\n--- [{i}/{len(days_to_process)}] {target_date} ({weekday_name}) ---")
+
+            # Delete existing for this day
+            existing = by_date.get(target_date, [])
+            if existing:
+                ids = [r["id"] for r in existing]
+                try:
+                    _rpc_delete_attendances(rpc_sess, base_url, ids)
+                    print(f"  Eliminados {len(ids)} registro(s) existentes.")
+                except Exception as exc:
+                    print(f"  ERROR al eliminar: {exc}")
+                    fail_count += 1
+                    continue
+
+            # Create new
+            try:
+                count = _rpc_create_attendance(rpc_sess, base_url, target_date,
+                                               blocks, username=username)
+                print(f"  OK: {count} bloque(s) creados.")
+                success_count += 1
+            except Exception as exc:
+                print(f"  ERROR al crear: {type(exc).__name__}: {exc}")
+                fail_count += 1
+
+        print(f"\n=== Correccion completada ===")
+        print(f"  Exitosos: {success_count}")
+        print(f"  Fallidos: {fail_count}")
+        return 0 if fail_count == 0 else 1
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def run_check_missing(config: dict | None = None,
+                      lookback_days: int = 200) -> list[date]:
+    """Check the last *lookback_days* for missing attendance days.
+
+    Returns a list of dates that should have been fichado but weren't.
+    Does NOT include today (today is handled by the normal dialog).
+    """
+    if config is None:
+        config = load_config()
+
+    from datetime import timedelta
+    today = date.today()
+    start = today - timedelta(days=lookback_days)
+    end = today - timedelta(days=1)  # don't include today
+
+    skip_weekdays = set(config.get("behavior", {}).get("skip_weekdays", []))
+
+    # Build expected working days
+    expected: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() not in skip_weekdays:
+            blocks = get_today_blocks(current, config)
+            if blocks:
+                expected.append(current)
+        current += timedelta(days=1)
+
+    print(f"Comprobando dias faltantes (ultimos {lookback_days} dias)...")
+    print(f"  Rango: {start} a {end}")
+    print(f"  Dias laborables esperados: {len(expected)}")
+
+    try:
+        rpc_sess, base_url, driver = _rpc_login_and_get_session(config, force_headless=True)
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        return []
+
+    try:
+        username = str(config.get("odoo", {}).get("username", "")).strip()
+        emp_id = _rpc_resolve_employee(rpc_sess, base_url, username=username)
+        by_date = _rpc_find_attendances(rpc_sess, base_url, emp_id, start, end)
+
+        missing: list[date] = []
+        for d in expected:
+            if d not in by_date or not by_date[d]:
+                missing.append(d)
+
+        print(f"  Dias con fichaje: {len(expected) - len(missing)}")
+        print(f"  Dias faltantes:   {len(missing)}")
+        if missing:
+            print("\nDias faltantes:")
+            for d in missing:
+                weekday_name = ["Lunes", "Martes", "Miercoles", "Jueves",
+                                "Viernes", "Sabado", "Domingo"][d.weekday()]
+                print(f"  {d} ({weekday_name})")
+        return missing
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        return []
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1117,11 +1401,41 @@ def create_today_attendance_for_date(
 
 
 if __name__ == "__main__":
-    # Support: python odoo_attendance.py                          -> today's fichaje
-    #          python odoo_attendance.py --bulk START END          -> bulk range
-    #          python odoo_attendance.py --bulk START END --exclude D1,D2,...  -> bulk with exclusions
+    # Support:
+    #   python odoo_attendance.py                          -> today's fichaje
+    #   python odoo_attendance.py --bulk START END [--exclude D1,D2,...]
+    #   python odoo_attendance.py --delete START END       -> delete range
+    #   python odoo_attendance.py --correct START END      -> correct range
+    #   python odoo_attendance.py --check-missing          -> show missing days
+    from datetime import datetime as _dt
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--check-missing":
+        missing = run_check_missing()
+        # Output as JSON for machine parsing
+        import json as _json
+        print("\n__JSON__")
+        print(_json.dumps([d.isoformat() for d in missing]))
+        sys.exit(0)
+
+    if len(sys.argv) >= 4 and sys.argv[1] == "--delete":
+        try:
+            start = _dt.strptime(sys.argv[2], "%Y-%m-%d").date()
+            end = _dt.strptime(sys.argv[3], "%Y-%m-%d").date()
+        except ValueError:
+            print("Formato de fecha invalido. Usa YYYY-MM-DD (ej: 2026-08-01 2026-08-31).")
+            sys.exit(1)
+        sys.exit(run_delete_range(start, end))
+
+    if len(sys.argv) >= 4 and sys.argv[1] == "--correct":
+        try:
+            start = _dt.strptime(sys.argv[2], "%Y-%m-%d").date()
+            end = _dt.strptime(sys.argv[3], "%Y-%m-%d").date()
+        except ValueError:
+            print("Formato de fecha invalido. Usa YYYY-MM-DD (ej: 2026-08-01 2026-08-31).")
+            sys.exit(1)
+        sys.exit(run_correct_range(start, end))
+
     if len(sys.argv) >= 4 and sys.argv[1] == "--bulk":
-        from datetime import datetime as _dt
         try:
             start = _dt.strptime(sys.argv[2], "%Y-%m-%d").date()
             end = _dt.strptime(sys.argv[3], "%Y-%m-%d").date()
@@ -1141,4 +1455,6 @@ if __name__ == "__main__":
                 print("Formato de exclusion invalido. Usa YYYY-MM-DD separadas por comas.")
                 sys.exit(1)
         sys.exit(run_bulk(start, end, excluded_dates=excluded))
-    sys.exit(main())
+    # --headless flag forces Chrome to run without a visible window
+    force_headless = "--headless" in sys.argv
+    sys.exit(main(force_headless=force_headless))
